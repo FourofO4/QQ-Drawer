@@ -36,8 +36,9 @@
 *.db     binary
 *.db-shm binary
 *.db-wal binary
-Cargo.lock  -diff
-package-lock.json  -diff
+# 锁文件：强制 LF，保证跨平台 hash 稳定（内容仍然照常参与 diff）
+Cargo.lock         text eol=lf
+package-lock.json  text eol=lf
 
 # 让 GitHub / 各类 diff 视图认得这些是生成产物
 dist/**  linguist-generated

@@ -54,27 +54,29 @@
 
 只有三项：Node.js、Rust、一个 C 链接器。
 
-| 组件 | 用途 | 本机位置 |
-| --- | --- | --- |
-| **Node.js** ≥ 20 | 前端构建与单测 | 系统 PATH 上的 `node` |
-| **Rust**（rustup + `stable`） | 后端编译 | `R:\Rust\cargo\bin` |
-| **MinGW-w64**（GCC） | Rust 的链接器（`windows-gnu` 工具链） | `R:\Rust\mingw64\bin` |
+| 组件 | 版本 | 用途 | 本机位置 |
+| --- | --- | --- | --- |
+| **Node.js** | ≥ 20 | 前端构建与单测 | 系统 PATH 上的 `node` |
+| **Rust** `stable` | 1.98.1 | 后端编译 | `R:\Rust\toolchain` |
+| **MinGW-w64**（GCC） | 16.2.0 | Rust `windows-gnu` 的链接器；也是编 SQLite 的 C 编译器 | `R:\Rust\mingw64` |
 
 ### 1.1 本机已装好的配置
 
-Rust 装在 R 盘，靠三个用户级环境变量指过去（**`rustup-init` 是用 `--no-modify-path` 装的，这几个变量必须存在，否则 `cargo` 找不到工具链**）：
+工具链整体在 R 盘，靠用户级环境变量指过去：
 
 ```
-RUSTUP_HOME = R:\Rust\rustup
-CARGO_HOME  = R:\Rust\cargo
-PATH       += R:\Rust\cargo\bin;R:\Rust\mingw64\bin
+CARGO_HOME  = R:\Rust\cargo          # cargo 的配置与依赖缓存
+RUSTUP_HOME = R:\Rust\rustup         # 仅 rustup 用，本项目实际不依赖它（见 §1.3）
+PATH       += R:\Rust\toolchain\bin;R:\Rust\mingw64\bin
 ```
+
+**这两个 PATH 项必须在最前面。** 系统里还躺着两套旧 MinGW —— `R:\Dev-Cpp\MinGW64` 的 gcc 4.9.2 和 `R:\VScodec\mingw64` 的 MinGW.org 8.2.0，mingw-w64 运行时都太旧。它们一旦抢先被找到，链接会以很难查的方式失败。`R:\Rust\cargo\config.toml` 里另外把 linker 写成了绝对路径，双保险。
 
 验证：
 
 ```bash
-cargo --version     # cargo 1.9x
-rustc -vV           # host: x86_64-pc-windows-gnu
+cargo --version     # cargo 1.98.1
+rustc -vV           # rustc 1.98.1 / host: x86_64-pc-windows-gnu / LLVM 22.1.8
 gcc --version       # gcc (MinGW-W64 x86_64-ucrt-posix-seh) 16.2.0
 ```
 
@@ -82,29 +84,88 @@ gcc --version       # gcc (MinGW-W64 x86_64-ucrt-posix-seh) 16.2.0
 
 Tauri 在 Windows 上官方推荐 MSVC，但 **MSVC 需要一个管理员权限的 Visual Studio Build Tools 安装（约 3 GB）**，本机没有装也没有管理员权限，所以选了免安装、解压即用的 `x86_64-pc-windows-gnu` + MinGW-w64。
 
-代价与出路：
-
-- `cargo test` / `cargo build` 正常可用，本项目不依赖任何 MSVC 专有特性。
-- 如果以后拿到了管理员权限，切回 MSVC 只要两步：
-  ```bash
-  rustup toolchain install stable-x86_64-pc-windows-msvc
-  rustup default stable-x86_64-pc-windows-msvc
-  ```
-  装 VS Build Tools 时勾选「使用 C++ 的桌面开发」即可，MinGW 可以留着不用。
-
-### 1.3 从零重装（换机器时照做）
+本项目不依赖任何 MSVC 专有特性，所以 `cargo test` / `cargo build` 正常可用。以后若拿到管理员权限要切回 MSVC，两步即可：
 
 ```bash
-# Rust：装到 R 盘，host 选 gnu，不碰 PATH
-curl -L -o rustup-init.exe https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe
-RUSTUP_HOME=R:\Rust\rustup CARGO_HOME=R:\Rust\cargo \
-  ./rustup-init.exe -y --no-modify-path \
-  --default-host x86_64-pc-windows-gnu --default-toolchain stable --profile default
-
-# 再手动设好 §1.1 的三个用户级环境变量
+rustup toolchain install stable-x86_64-pc-windows-msvc
+rustup default stable-x86_64-pc-windows-msvc
 ```
 
-> MinGW-w64 从 <https://winlibs.com/> 下 `x86_64-posix-seh-ucrt` 的 zip，解压到 `R:\Rust\mingw64` 即可，不需要安装程序。
+装 VS Build Tools 时勾选「使用 C++ 的桌面开发」。MinGW 可以留着不用。
+
+### 1.3 为什么工具链不是 rustup 装的
+
+`R:\Rust\toolchain` 下的 Rust 是**手工装的**，不是 rustup 装的。
+
+现象：`rustup-init` 跑起来后一动不动，没有进度，也没有报错，放两个小时还是那样。
+
+排查：看它留下的临时目录，它在写 `<RUSTUP_HOME>\tmp\<随机>_dir\components` 时被拒绝——
+`os error 5 拒绝访问`。写不进去就回滚重试，重试又失败，于是无限循环，界面表现就是"卡住"。
+
+> 当时把原因记成了"路径名叫 `components` 就被拒"，**那是误判**。后来在 `cargo test` 上
+> 撞到同一个错误码，才定位到真正的原因：这台机器上对工作区之外的文件写入会被安全策略
+> 拦截（见 §1.4）。名字纯属巧合。
+
+那个 `components` 只是一份记录"已装哪些组件"的文本文件，手工安装根本不需要它。于是改成：
+从官方发行清单里取各组件地址，自己下载 `.tar.xz` 并直接解压到最终位置。脚本留在
+`R:\Rust\install-toolchain.py`，幂等，可重复跑。
+
+组件与目录映射规则（各包布局不同，所以按"路径里第一个 `bin`/`lib`/`share`/`etc` 就是安装根"来归一）：
+
+```
+rustc-<v>-<triple>/rustc/bin/...        -> toolchain/bin/...
+rust-std-<v>-<triple>/rust-std-<t>/lib/...-> toolchain/lib/...
+rust-mingw-<v>-<triple>/rust-mingw/lib/...-> toolchain/lib/...   （自带 MinGW 链接库）
+clippy-preview-<v>-<triple>/.../bin/... -> toolchain/bin/...
+```
+
+换机器要重装时：
+
+```bash
+# 1) MinGW-w64：从 https://winlibs.com/ 下 x86_64-posix-seh-ucrt 的 zip
+#    解压到 R:\Rust\mingw64（免安装，不需要管理员）
+# 2) Rust：跑安装脚本（会自己解析版本、下载、解压、跳过已装好的组件）
+python R:\Rust\install-toolchain.py
+# 3) 手工设好 §1.1 的三个用户级环境变量
+```
+
+> 装 rustup 本身也可以，只是**别用它装工具链**，会撞上上面那个坑。
+
+### 1.4 在沙箱 / 受限环境里构建
+
+**只在自己终端里跑 `cargo build` / `cargo test` 的话，这一节可以跳过。**
+
+症状：`cargo test` 慢得离谱——解包依赖大约 4 个包/分钟（正常是每秒几十个），
+跑 29 分钟后以 `failed to unpack ... 拒绝访问 (os error 5)` 失败。
+
+原因：受限环境下对**工作区之外**的写入会被拦截，而且**每一次建文件**都要过一次策略检查。
+实测同一台机器上建 1000 字节文件：
+
+| 位置 | 每次建文件耗时 |
+| --- | --- |
+| 系统临时目录 `%TEMP%` | 0.3 ~ 1 ms |
+| 工作区 `R:\Code\QQ Drawer` | 356 ms |
+| `R:\Rust` | 356 ms |
+
+cargo 解包 + 编译要建十几万个文件，350 ms/文件是跑不完的。**不是 R 盘慢**——用
+PowerShell 的 `[System.IO.File]::WriteAllText` 在 R 盘上测是 0.4 ms/文件。R 盘本身没问题。
+
+解法：把 cargo 的 home 和 target 都挪到临时目录（工具链仍在 `R:\Rust\toolchain`，只读不受影响）。
+
+```bash
+# 复制 .crate 缓存（84 MB）+ 稀疏索引（33 MB）+ config.toml 到临时目录
+python R:\Rust\setup-build-home.py
+
+set CARGO_HOME=%TEMP%\qq-cargo-home
+set CARGO_TARGET_DIR=%TEMP%\qq-drawer-target
+cd src-tauri
+cargo test --offline
+```
+
+`R:\Rust\run-cargo-test.py` 把上面这段打成了一个脚本，日志写在 `%TEMP%\qq-cargo-test.log`。
+
+> 脚本里刻意**不做任何删除**：bash 的 `rm` 走的是回收站垫片，在 R 盘上回收站调用会失败并
+> 按 fail-closed 卡住（实测卡死 3 分钟零输出）。日志文件用 `wb` 截断代替删除。
 
 ---
 
