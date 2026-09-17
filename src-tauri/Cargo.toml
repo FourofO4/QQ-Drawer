@@ -1,0 +1,70 @@
+[package]
+name = "qq-drawer"
+version = "1.0.0"
+description = "贴在 Windows 10 桌面上的一条 QQ 消息抽屉"
+authors = ["qq-drawer"]
+edition = "2021"
+rust-version = "1.77"
+
+# 优化清单 #9：体积优先。安装包目标是 ≤ 10 MB（PERF-01）。
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = "z"
+panic = "abort"
+strip = true
+incremental = false
+
+# 开发时也把依赖编成 release，否则 NapCat 的首帧解析会慢得离谱
+[profile.dev.package."*"]
+opt-level = 2
+
+[lib]
+name = "qq_drawer_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# 应用骨架。tray-icon 是硬需求（无边框窗口没有系统关闭入口）；
+# image-png 用来解码托盘图标。
+#
+# 下限锁到 2.1：`Builder::register_uri_scheme_protocol` 的回调在 2.1 起收
+# `UriSchemeContext`（而不是裸 `&AppHandle`）。写成 "2" 会允许解析到 2.0，
+# 那样 `lib.rs` 里媒体协议的签名会对不上，报一堆看不懂的类型错误。
+tauri = { version = "2.1", features = ["tray-icon", "image-png"] }
+
+# 全局快捷键：skipTaskbar 之后窗口也从 Alt+Tab 消失，它是必需品（§3.4）
+tauri-plugin-global-shortcut = "2"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 异步运行时：一个 WS 长连接 + 若干后台任务（图片下载、缓存清理）
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio-tungstenite = "0.24"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+
+# 存储：bundled 免去用户机器上装 SQLite 的麻烦
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+
+# 只用 rustls，避免拖进 OpenSSL；只为下载图片直链，别的不依赖它
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# 日志按天滚动到 %LOCALAPPDATA%\qq-drawer\logs（§4.4）
+tracing-appender = "0.2"
+parking_lot = "0.12"
+
+# Win10 背景模糊。官方文档标注 apply_acrylic 在 Win10 v1903+ 拖动/缩放时性能很差，
+# 本项目窗口会被频繁拖动，所以只用 apply_blur（§4.3）
+[target.'cfg(target_os = "windows")'.dependencies]
+window-vibrancy = "0.6"
