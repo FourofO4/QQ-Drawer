@@ -271,7 +271,6 @@ pub fn peer_type_of(is_group: bool) -> i32 {
 }
 
 #[cfg(test)]
-#[allow(uncommon_codepoints)]
 mod tests {
     use super::*;
     use crate::store::Db;

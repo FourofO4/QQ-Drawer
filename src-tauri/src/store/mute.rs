@@ -48,7 +48,6 @@ pub fn count(conn: &Connection) -> Result<i64> {
 }
 
 #[cfg(test)]
-#[allow(uncommon_codepoints)]
 mod tests {
     use super::*;
     use crate::store::{conversation, Db};

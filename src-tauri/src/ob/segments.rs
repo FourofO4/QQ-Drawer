@@ -264,7 +264,6 @@ pub fn recent_contact_seed(items: &[Value]) -> Vec<(crate::model::Peer, String, 
 }
 
 #[cfg(test)]
-#[allow(uncommon_codepoints)]
 mod tests {
     use super::*;
 
@@ -283,14 +282,21 @@ mod tests {
         );
         assert!(p.is_at_me);
         assert_eq!(p.segments.len(), 2);
-        assert_eq!(p.plain_text(), "@10001 字段名定了没？");
-        assert_eq!(p.unknown_at_names(), vec![10001]);
+        // 艾特自己走的是固定文案 `@你`（`model::Seg::as_plain`，规格书 §4.7 的界面示意
+        // 画的也是「@你 那个接口的字段名定了没？」）。不是 `@10001`：给用户看 QQ 号
+        // 没意义，而 `@昵称` 又要等成员表回填，所以自己这一档直接写死。
+        assert_eq!(p.plain_text(), "@你 字段名定了没？");
+        // 自己这一档不需要查名字：文案是写死的 `@你`，所以不计入待查名单
+        assert!(p.unknown_at_names().is_empty());
     }
 
     #[test]
     fn 解析_艾特别人不算艾特我() {
         let p = parse(&raw(json!([{ "type": "at", "data": { "qq": "30011" } }])), 10001);
         assert!(!p.is_at_me);
+        // 别人的 at 且上游没给名字 → 要进待查名单，等群成员表回填（见 `解析_名字能被回填`）
+        assert_eq!(p.unknown_at_names(), vec![30011]);
+        assert_eq!(p.plain_text(), "@30011");
     }
 
     #[test]
@@ -395,7 +401,7 @@ mod tests {
     #[test]
     fn 序列化_文本艾特图片() {
         let parts = vec![
-            OutgoingPart::Text { text: "来了 " },
+            OutgoingPart::Text { text: "来了 ".into() },
             OutgoingPart::At { qq: 30011, name: "李工".into() },
             OutgoingPart::Image { sha256: "x".into(), path: "C:/m/a.png".into() },
         ];

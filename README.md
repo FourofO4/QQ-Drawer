@@ -4,8 +4,9 @@
 
 **电脑上不登录 QQ 客户端**——消息来自本机运行的 NapCat（无头 QQ）+ OneBot 11 WebSocket，登录态留在手机 QQ 上。
 
-> **状态**：v1.0 代码已完成。前端 127 个单测全绿，`tsc --noEmit` 无错，生产构建通过。
-> Rust 侧写了 210 个单测，本机环境详见 [§ 环境准备](#1-环境准备)；若尚未跑过 `cargo test`，请以那里为准确认验证状态。
+> **状态**：v1.0 代码已完成。前端 127 个单测全绿，`tsc --noEmit` 无错，生产构建通过；
+> Rust 侧 216 个单测全绿（`cargo test`，Windows + GNU 工具链）。第一次在本机跑 `cargo test`
+> 若报 `0xc0000139`，看 [§1.5](#15-cargo-test-与-windows-应用清单)。
 >
 > 实现依据：[`docs/开发规格说明书.md`](docs/开发规格说明书.md)（需求、交互、数据模型、踩坑清单全在里面）
 > 形态预览：[`preview/qq-drawer-preview.html`](preview/qq-drawer-preview.html)（单文件零依赖，双击打开）
@@ -166,6 +167,38 @@ cargo test --offline
 
 > 脚本里刻意**不做任何删除**：bash 的 `rm` 走的是回收站垫片，在 R 盘上回收站调用会失败并
 > 按 fail-closed 卡住（实测卡死 3 分钟零输出）。日志文件用 `wb` 截断代替删除。
+
+### 1.5 `cargo test` 与 Windows 应用清单
+
+如果 `cargo test` 报成这样，问题不在你的代码：
+
+```
+error: test failed, to rerun pass `--lib`
+Caused by:
+  process didn't exit successfully: ...\qq_drawer_lib-<hash>.exe
+  (exit code: 0xc0000139, STATUS_ENTRYPOINT_NOT_FOUND)
+```
+
+`0xC0000139` 是**加载期**错误，测试进程连 `main` 都没进。原因在清单：
+
+- `tauri-runtime-wry` 的 Windows 对话框实现调用了 `TaskDialogIndirect`，
+  这个函数**只有 Common-Controls v6** 才导出，System32 里的 legacy `comctl32.dll`
+  （5.82）没有。要拿到 v6，可执行文件必须嵌入一份声明该依赖的清单。
+- `tauri-build` 只把清单链接给 `[[bin]]`（发的是 `cargo:rustc-link-arg-bins=`），
+  `cargo test --lib` 的测试宿主拿不到，于是被绑到 5.82，加载直接失败。
+- 换用更窄的 `cargo:rustc-link-arg-tests=` 也不管用：cargo 里它判的是
+  `target.is_test()`，只认 `tests/` 目录下的集成测试；没有 `tests/` 目录时
+  cargo 还会直接以 "does not have a test target" 中止构建（上游未修，cargo#10937）。
+- 唯一能覆盖单元测试的是不限定的 `cargo:rustc-link-arg=`（cargo 里对应
+  `LinkArgTarget::All`，判断是恒定 `true`），但它同时也会作用于 `[[bin]]`。
+
+所以 `src-tauri/build.rs` 里做了两件事：先用
+`tauri_build::WindowsAttributes::new_without_app_manifest()` 关掉 `tauri-build` 自带的那份，
+再自己生成同一份清单并用 `compile_for_everything()` 发给所有目标——每个二进制里仍然只有一份清单。
+`[[bin]]` 的图标和版本信息不受影响，仍由 `tauri-build` 提供。
+
+**GNU 工具链下这一步需要 PATH 里有 `windres` 和 `ar`**（`tauri-build` 编图标时本来就需要，
+见 §1.1）。踩过一次就别再把 `new_without_app_manifest()` 删掉了。
 
 ---
 

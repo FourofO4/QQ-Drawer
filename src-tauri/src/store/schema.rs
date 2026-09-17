@@ -232,11 +232,13 @@ mod tests {
     #[test]
     fn wal_and_sync_pragmas_applied() {
         let conn = mem();
-        // 内存库的 journal_mode 会是 memory，只验证设置语句没有报错且同步级别生效
-        let sync: String = conn
+        // 内存库的 journal_mode 会是 memory，只验证设置语句没有报错且同步级别生效。
+        // `PRAGMA synchronous` 回的是整数（0=OFF / 1=NORMAL / 2=FULL / 3=EXTRA），
+        // 不是字符串 —— 按 String 取会得到 InvalidColumnType。
+        let sync: i64 = conn
             .query_row("PRAGMA synchronous", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(sync, "1"); // NORMAL
+        assert_eq!(sync, 1); // NORMAL
     }
 
     #[test]

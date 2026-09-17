@@ -52,7 +52,6 @@ pub fn reset(conn: &Connection) -> Result<()> {
 }
 
 #[cfg(test)]
-#[allow(uncommon_codepoints)]
 mod tests {
     use super::*;
     use crate::store::Db;

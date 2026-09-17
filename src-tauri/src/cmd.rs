@@ -441,7 +441,7 @@ pub fn mark_read(
 
 #[tauri::command]
 pub fn mark_all_read(app: AppHandle, state: State<'_, Arc<AppState>>) -> CmdResult<()> {
-    state.db.tx(conv_store::reset_all_unread).map_err(err)?;
+    state.db.tx(|c| conv_store::reset_all_unread(c)).map_err(err)?;
     if let Some(bus) = state.bus.read().clone() {
         bus.mark_all_as_read();
     }
@@ -617,8 +617,12 @@ pub async fn list_members(
         .with(|c| member_store::is_stale(c, group_id))
         .unwrap_or(true);
 
+    // 先把 bus 克隆出来再 await：`state.bus.read()` 的读锁守卫不是 Send，
+    // 一旦跨 await 持有，整个 future 就不是 Send，`#[tauri::command]` 直接编不过。
+    let bus = state.bus.read().clone();
+
     if stale {
-        if let Some(bus) = state.bus.read().clone() {
+        if let Some(bus) = bus {
             match bus.get_group_member_list(group_id).await {
                 Ok(data) => {
                     let rows = ob::event::member_rows(&data);
@@ -862,7 +866,6 @@ pub fn exit_app(app: AppHandle) {
 }
 
 #[cfg(test)]
-#[allow(uncommon_codepoints)]
 mod tests {
     use super::*;
 

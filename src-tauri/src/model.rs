@@ -137,7 +137,7 @@ pub fn seg_types(segs: &[Seg]) -> String {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ImageRef {
     pub sha256: String,
-    /// 相对 media 目录的路径，前端拼成 asset 地址
+    /// 相对 media 目录的路径，前端拼成 `http://media.localhost/<路径>` 后再喂给 `<img>`
     pub rel_path: String,
     pub width: Option<i64>,
     pub height: Option<i64>,

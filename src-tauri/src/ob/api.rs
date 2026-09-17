@@ -423,7 +423,6 @@ impl ActionBus {
 }
 
 #[cfg(test)]
-#[allow(uncommon_codepoints)]
 mod tests {
     use super::*;
 

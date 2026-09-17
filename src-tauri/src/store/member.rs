@@ -117,7 +117,6 @@ pub fn count(conn: &Connection, group_id: i64) -> Result<i64> {
 }
 
 #[cfg(test)]
-#[allow(uncommon_codepoints)]
 mod tests {
     use super::*;
     use crate::store::Db;

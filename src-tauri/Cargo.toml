@@ -25,6 +25,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# 给 cargo test --lib 的测试宿主补一份 Windows 应用清单。
+# tauri-build 只把清单链进 [[bin]]，缺了它测试进程会在加载期以
+# STATUS_ENTRYPOINT_NOT_FOUND (0xC0000139) 直接退出（详见 build.rs）。
+embed-resource = "3"
 
 [dependencies]
 # 应用骨架。tray-icon 是硬需求（无边框窗口没有系统关闭入口）；

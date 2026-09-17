@@ -10,7 +10,6 @@
 //! 幂等的责任在 `store::message::upsert`（`message_id` 唯一），不在这一层。
 //! 所以"同一条消息被事件与历史拉取各送一次"完全不用在这里小心避让。
 
-use anyhow::Result;
 use serde_json::Value;
 use std::sync::Arc;
 use tauri::AppHandle;
@@ -569,7 +568,6 @@ pub fn ingest_history(app: &AppHandle, state: &Arc<AppState>, self_id: i64, item
 }
 
 #[cfg(test)]
-#[allow(uncommon_codepoints)]
 mod tests {
     use super::*;
     use serde_json::json;

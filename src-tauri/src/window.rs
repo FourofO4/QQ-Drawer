@@ -310,7 +310,6 @@ pub fn on_bar_width_changed(app: &AppHandle, state: &Arc<AppState>) {
 }
 
 #[cfg(test)]
-#[allow(uncommon_codepoints)]
 mod tests {
     use super::*;
 

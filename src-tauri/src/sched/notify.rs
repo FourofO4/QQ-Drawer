@@ -171,7 +171,6 @@ impl ConversationDto {
 }
 
 #[cfg(test)]
-#[allow(uncommon_codepoints)]
 mod tests {
     use super::*;
     use crate::model::PEER_GROUP;
@@ -318,8 +317,10 @@ mod tests {
 
     #[test]
     fn 完全没有未读时显示全局最新() {
+        // 一条未读都没有 → 退化成「谁的 last_msg_time 最大就显示谁」。
+        // conv() 默认给 1000，所以这里 1 号（7000）比 2 号（默认 1000）新。
         let list = vec![conv(1, |c| c.last_msg_time = Some(7000)), conv(2, |_| {})];
-        assert_eq!(pick_bar(&list).unwrap().peer_id, 2);
+        assert_eq!(pick_bar(&list).unwrap().peer_id, 1);
     }
 
     /* ---------- 折叠条文案 ---------- */

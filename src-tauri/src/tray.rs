@@ -10,7 +10,7 @@
 use std::sync::Arc;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 use crate::appstate::{emit, events, AppState};
 use crate::model::Peer;
@@ -19,6 +19,13 @@ use crate::window;
 
 /// 托盘图标 id。多托盘场景下用它定位（本项目只有一个）。
 pub const TRAY_ID: &str = "main";
+
+/// 托盘菜单里「锁定展开」这一项的句柄，托管在 Tauri 的 state 里。
+///
+/// 为什么要存一份：`TrayIcon` 只有 `set_menu`，没有取回菜单的接口，`Menu` 也没有
+/// 按 id 查项的方法。而设置页里改「锁定」时（`cmd::set_setting`）必须把托盘的勾选
+/// 态同步过去，否则托盘勾选会和实际状态不一致。建菜单时顺手把这一项存下来最省事。
+pub struct LockItem(pub CheckMenuItem<tauri::Wry>);
 
 /// 菜单项 id。与 `action_for` 必须一一对应。
 pub mod item {
@@ -84,6 +91,9 @@ pub fn build(app: &AppHandle, state: &Arc<AppState>) -> tauri::Result<()> {
     let state_menu = state.clone();
     let lock_item = lock.clone();
 
+    // 存下句柄本身，`sync_lock_check` 要靠它同步勾选态（见 `LockItem` 的注释）。
+    app.manage(LockItem(lock.clone()));
+
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon)
         .tooltip("QQ 抽屉")
@@ -139,11 +149,8 @@ pub fn fallback_icon_rgba() -> Vec<u8> {
 
 /// 同步「锁定展开」的勾选态。设置页改了锁定之后也要调它，否则托盘勾选会和实际状态不一致。
 pub fn sync_lock_check(app: &AppHandle, locked: bool) {
-    let Some(tray) = app.tray_by_id(TRAY_ID) else { return };
-    let Some(menu) = tray.menu() else { return };
-    let Some(item) = menu.get(item::LOCK) else { return };
-    let Some(check) = item.as_check_menuitem() else { return };
-    if let Err(e) = check.set_checked(locked) {
+    let Some(item) = app.try_state::<LockItem>() else { return };
+    if let Err(e) = item.0.set_checked(locked) {
         tracing::debug!(error = %e, "同步托盘勾选态失败");
     }
 }
@@ -243,21 +250,17 @@ pub fn toggle_mute_current(app: &AppHandle, state: &Arc<AppState>) {
         .flatten()
         .map(|c| c.name)
         .unwrap_or_else(|| peer.key());
-    crate::appstate::toast(
-        app,
-        if next {
-            format!("已静音「{name}」")
-        } else {
-            format!("已取消静音「{name}」")
-        },
-        "info",
-    );
+    let text = if next {
+        format!("已静音「{name}」")
+    } else {
+        format!("已取消静音「{name}」")
+    };
+    crate::appstate::toast(app, &text, "info");
 
     crate::appstate::emit_conversations(app, state);
 }
 
 #[cfg(test)]
-#[allow(uncommon_codepoints)]
 mod tests {
     use super::*;
 
@@ -271,7 +274,7 @@ mod tests {
     }
 
     #[test]
-    fn 未知菜单项不 panic() {
+    fn 未知菜单项不panic() {
         assert_eq!(action_for(""), TrayAction::Ignore);
         assert_eq!(action_for("tray.不存在的项"), TrayAction::Ignore);
     }

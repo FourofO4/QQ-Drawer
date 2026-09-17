@@ -309,7 +309,6 @@ pub fn shas_of_peer(conn: &Connection, peer: Peer) -> Result<Vec<String>> {
 }
 
 #[cfg(test)]
-#[allow(uncommon_codepoints)]
 mod tests {
     use super::*;
     use crate::model::Seg;
@@ -358,6 +357,7 @@ mod tests {
         let (bytes, count) = db.with(|c| total(c)).unwrap();
         assert_eq!(count, 1);
         assert_eq!(bytes, 1024);
+        Ok(())
     }
 
     #[test]

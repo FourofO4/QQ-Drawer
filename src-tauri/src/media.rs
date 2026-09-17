@@ -86,7 +86,9 @@ pub fn guess_ext(url: &str, content_type: Option<&str>) -> String {
         }
     }
 
-    // 退一步看路径：去掉查询串与 hash，再取最后一个点之后的部分
+    // 退一步看路径：去掉查询串与 hash，再取最后一个点之后的部分。
+    // 后缀限 1~5 个 ASCII 字母数字：真实的图片格式最长也就 4 个字符（jpeg/webp/avif），
+    // 更长的基本是 `a.unknownext` 这种把点当普通字符用的路径，当「没后缀」处理更稳。
     let path = url.split(['?', '#']).next().unwrap_or(url);
     let tail = path.rsplit('/').next().unwrap_or(path);
     match tail.rsplit_once('.') {
@@ -576,7 +578,6 @@ pub fn serve(root: &Path, request_path: &str) -> Served {
 }
 
 #[cfg(test)]
-#[allow(uncommon_codepoints)]
 mod tests {
     use super::*;
 
@@ -599,9 +600,12 @@ mod tests {
 
     #[test]
     fn 绝对路径挂在媒体目录下() {
-        let p = abs_path(Path::new("C:/d/qq-drawer/media"), SHA, "png");
-        assert!(p.starts_with("C:/d/qq-drawer/media"));
-        assert!(p.to_string_lossy().contains("/01/"));
+        let root = Path::new("C:/d/qq-drawer/media");
+        let p = abs_path(root, SHA, "png");
+        // 用 Path 比，别拼字符串断言：Windows 上 join 出来是 `01\<sha>.png`，
+        // 断言 contains("/01/") 会假失败（这正是它一直红着的原因）。
+        let rel = p.strip_prefix(root).expect("必须落在媒体目录下");
+        assert_eq!(rel, Path::new("01").join(format!("{SHA}.png")));
     }
 
     #[test]
@@ -611,7 +615,8 @@ mod tests {
         assert_eq!(guess_ext("http://x/a.webp", None), "webp");
         assert_eq!(guess_ext("http://x/a.png?v=2#f", None), "png");
         assert_eq!(guess_ext("http://x/noext", None), "png");
-        assert_eq!(guess_ext("http://x/a.unknownext", None), "unknownext");
+        // 后缀超过 5 个字符就不像图片格式了，按「没后缀」处理，退回默认 png
+        assert_eq!(guess_ext("http://x/a.unknownext", None), "png");
     }
 
     #[test]

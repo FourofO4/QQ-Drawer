@@ -491,7 +491,6 @@ fn load_sender_names(conn: &Connection, ids: &[i64]) -> Result<HashMap<i64, Stri
 }
 
 #[cfg(test)]
-#[allow(uncommon_codepoints)]
 mod tests {
     use super::*;
     use crate::store::{conversation, tombstone, Db};
@@ -563,6 +562,7 @@ mod tests {
             local.sender_id = 10001;
             local.send_state = crate::model::send_state::LOCAL;
             upsert(c, &local)?;
+            Ok(())
         })
         .unwrap();
 
@@ -613,7 +613,7 @@ mod tests {
     }
 
     #[test]
-    fn 分页_向上翻页取更早的一页且升序返回() {
+    fn 分页_向上翻页取更早的一页且升序返回() -> Result<()> {
         let db = db();
         setup(&db);
         db.tx(|c| {
@@ -664,7 +664,7 @@ mod tests {
     }
 
     #[test]
-    fn 引用_被删除时降级为已删除() {
+    fn 引用_被删除时降级为已删除() -> Result<()> {
         let db = db();
         setup(&db);
         db.tx(|c| {
@@ -758,7 +758,7 @@ mod tests {
     }
 
     #[test]
-    fn 会话序号自增且隔离() {
+    fn 会话序号自增且隔离() -> Result<()> {
         let db = db();
         setup(&db);
         db.with(|c| conversation::ensure(c, Peer::private(20001), "小陈", None)).unwrap();

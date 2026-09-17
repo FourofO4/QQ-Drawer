@@ -31,11 +31,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost media: http://media.localhost data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'",
-      "assetProtocol": {
-        "enable": true,
-        "scope": ["$LOCALDATA/qq-drawer/media/**"]
-      }
+      "csp": "default-src 'self'; img-src 'self' http://media.localhost media: data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'"
     }
   },
   "bundle": {

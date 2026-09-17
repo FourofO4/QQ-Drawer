@@ -60,7 +60,6 @@ pub fn clear_for_peer(conn: &Connection, peer: Peer) -> Result<usize> {
 }
 
 #[cfg(test)]
-#[allow(uncommon_codepoints)]
 mod tests {
     use super::*;
     use crate::store::Db;

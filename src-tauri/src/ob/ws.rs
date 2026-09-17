@@ -315,7 +315,6 @@ pub fn history_cursor(fallback: Option<i64>) -> i64 {
 }
 
 #[cfg(test)]
-#[allow(uncommon_codepoints)]
 mod tests {
     use super::*;
 

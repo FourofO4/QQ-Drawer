@@ -35,9 +35,9 @@ use tauri::{AppHandle, Manager};
 
 use crate::appstate::AppState;
 use crate::model::ConnInfo;
-use crate::store::{self, conversation as conv_store, schema, settings as settings_store, Db};
+use crate::store::{conversation as conv_store, schema, settings as settings_store, Db};
 
-/// 数据目录名。`tauri.conf.json` 的 assetProtocol scope 也写着它，改一处不行。
+/// 数据目录名。`%LOCALAPPDATA%\<这个名字>`，前端与媒体协议都按它拼路径，改一处不行。
 const APP_DIR: &str = "qq-drawer";
 
 /// 日志保留天数（§4.10 高级设置：7 天）。
@@ -146,8 +146,7 @@ fn reply(code: StatusCode, mime: &str, body: Vec<u8>) -> Response<Vec<u8>> {
 /// 数据目录：`%LOCALAPPDATA%\qq-drawer`。
 ///
 /// 用 `local_data_dir()` 而不是 `app_local_data_dir()`：后者会带上 identifier
-/// （`local.qqdrawer.app`），而规格书与 `tauri.conf.json` 的 assetProtocol scope
-/// 约定的都是 `%LOCALAPPDATA%\qq-drawer`。
+/// （`local.qqdrawer.app`），而规格书与 §4.8 的媒体路径约定都是 `%LOCALAPPDATA%\qq-drawer`。
 fn data_root(app: &AppHandle) -> anyhow::Result<PathBuf> {
     let base = app
         .path()
@@ -167,7 +166,7 @@ fn bootstrap(app: &AppHandle) -> anyhow::Result<Arc<AppState>> {
     tracing::info!(dir = %root.display(), "数据目录已就位");
 
     // FR-39：未读痕迹仅在本次运行期间有效 —— 用户很可能已经在手机上读过了
-    match db.tx(conv_store::reset_all_unread) {
+    match db.tx(|c| conv_store::reset_all_unread(c)) {
         Ok(n) if n > 0 => tracing::info!(count = n, "启动时清零未读痕迹"),
         Ok(_) => {}
         Err(e) => tracing::warn!(error = %e, "清零未读痕迹失败"),
@@ -287,7 +286,6 @@ fn prune_logs(dir: &Path, keep_days: u64) {
 }
 
 #[cfg(test)]
-#[allow(uncommon_codepoints)]
 mod tests {
     use super::*;
 

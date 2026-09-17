@@ -212,7 +212,14 @@ export const clearCache = (
   target?: { peerType: PeerType; peerId: number; days: number },
 ) => call<void>(CMD.clearCache, { scope, ...(target ?? {}) });
 
-/** 本地图片路径 → WebView2 可直接加载的 asset 协议地址 */
+/**
+ * 本地图片路径 → WebView2 可直接加载的地址。
+ *
+ * 走的是 Rust 侧自己注册的 `media` 协议（`http://media.localhost/<路径>`），
+ * 不是 Tauri 内置的 asset 协议 —— 内置那个要在 Cargo 里开 `protocol-asset`
+ * 并把目录写进 `tauri.conf.json` 的 allowlist，等于把整个 media 目录暴露给
+ * 页面；自定义协议由 `media::serve` 逐请求校验，能挡住路径穿越。
+ */
 export const imageUrl = (relPath: string): string =>
   isTauri() ? convertFileSrc(relPath, 'media') : relPath;
 
