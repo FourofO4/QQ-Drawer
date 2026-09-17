@@ -1,0 +1,21 @@
+# 依赖与构建产物
+node_modules/
+dist/
+src-tauri/target/
+
+# 本机运行时数据（数据库、图片缓存、日志一律在 %LOCALAPPDATA%，不进仓库）
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+# 编辑器 / 系统
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# 环境
+.env
+.env.local
