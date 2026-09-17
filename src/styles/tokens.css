@@ -1,0 +1,77 @@
+/**
+ * 视觉令牌（§3.6）。
+ *
+ * 改视觉只改这一个文件。注意：颜色**不带透明度的部分**用静态值即可，
+ * 但任何需要 alpha 参与运算的底色都在 JS 里算好写进变量（见 core/theme.ts），
+ * 绝不在这里写 `rgba(..., calc(...))` —— 踩坑清单第 1 条。
+ */
+
+:root {
+  /* ---- 文字 ---- */
+  --t1: #d3d1c7; /* 主要文字（消息正文、选中标签） */
+  --t2: #b4b2a9; /* 次要文字（未选中标签、会话名） */
+  --t3: #888780; /* 三级文字（发送者名字、辅助信息） */
+  --t4: #5f5e5a; /* 四级文字（时间、提示行、占位符） */
+
+  /* ---- 语义色 ---- */
+  --blue: #378add; /* 自己发送的气泡底色 */
+  --amber: #ba7517; /* 未读/痕迹主色（深） */
+  --amber-l: #ef9f27; /* 未读/痕迹主色（亮，竖条与 @ 描边） */
+  --red: #e24b4a; /* 错误态（连接失败、发送失败） */
+
+  --stroke: rgba(255, 255, 255, 0.13); /* 0.5px 主描边 */
+  --stroke-strong: rgba(255, 255, 255, 0.26); /* 闪烁峰值描边 */
+
+  /* ---- 圆角 ---- */
+  --r-panel: 18px;
+  --r-card: 11px;
+  --r-card-lg: 11px;
+  --r-tab: 8px;
+  --r-bub: 11px;
+  --r-input: 9px;
+
+  /* ---- 尺寸 ---- */
+  --h-tabs: 42px;
+  --h-bar: 40px;
+  --w-panel: 584px;
+  --h-panel: 500px;
+  --indent-cont: 34px;
+  --avatar: 26px;
+  --bub-max: 330px;
+  --thumb-w: 148px;
+  --thumb-h: 92px;
+
+  /* ---- 字体 ---- */
+  --font: 'Segoe UI', 'Microsoft YaHei', system-ui, -apple-system, sans-serif;
+  --fs-body: 13px;
+  --lh-body: 1.6;
+  --fs-ui: 12px;
+  --fs-meta: 11px;
+
+  /* ---- 动效（尊重 prefers-reduced-motion，见 global.css） ---- */
+  --dur-expand: 180ms;
+  --dur-collapse: 160ms;
+  --dur-mark: 180ms;
+  --dur-overflow: 140ms;
+  --dur-tab: 120ms;
+  --dur-flash: 600ms;
+  --flash-times: 3;
+
+  /* ---- 以下由 core/theme.ts 运行时写入，这里只给兜底值 ---- */
+  --panel-a: 0.72;
+  --panel-a-flash: 0.3024;
+  --panel-r: 38;
+  --panel-g: 38;
+  --panel-b: 37;
+  --panel-bg: rgba(38, 38, 37, 0.72);
+  --panel-bg-flash: rgba(38, 38, 37, 0.3024);
+  --overflow-bg: rgba(28, 28, 27, 0.95);
+
+  --bub-a: 0.35;
+  --bub-other-bg: rgba(255, 255, 255, 0.077);
+  --bub-other-stroke: rgba(255, 255, 255, 0.147);
+  --bub-own-bg: rgba(55, 138, 221, 0.35);
+  --bub-own-stroke: rgba(133, 183, 235, 0.315);
+  --bub-atme-stroke: rgba(239, 159, 39, 0.49);
+  --input-bg: rgba(255, 255, 255, 0.056);
+}
