@@ -1,0 +1,43 @@
+# 行尾统一为 LF
+#
+# 本机全局 core.autocrlf=true，git 每次 add 都会提示 "LF will be replaced by CRLF"。
+# 那个设置是给"只写 Windows 代码"的人用的；本项目是 Rust + TS 的混合工程，
+# 源码在 Windows 与 Linux 之间流转，行尾必须统一，否则每次跨平台 checkout
+# 都会产生满屏的假 diff。这里显式钉死 LF，覆盖 core.autocrlf。
+
+* text=auto eol=lf
+
+# Windows 批处理的例外：cmd.exe 解析 CRLF 更稳，改了反而会出问题
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制文件：不做行尾转换，也不参与 diff / merge
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.webp binary
+*.bmp  binary
+*.ico  binary
+*.icns binary
+*.ttf  binary
+*.otf  binary
+*.woff binary
+*.woff2 binary
+*.zip  binary
+*.7z   binary
+*.gz   binary
+*.exe  binary
+*.dll  binary
+*.so   binary
+*.dylib binary
+
+# 本机运行时数据与锁文件（万一被误加进仓库，也不要让 git 尝试合并）
+*.db     binary
+*.db-shm binary
+*.db-wal binary
+Cargo.lock  -diff
+package-lock.json  -diff
+
+# 让 GitHub / 各类 diff 视图认得这些是生成产物
+dist/**  linguist-generated

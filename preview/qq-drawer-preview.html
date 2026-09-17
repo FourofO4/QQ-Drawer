@@ -1,0 +1,710 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>QQ 抽屉 · 形态预览</title>
+<style>
+  :root{
+    --t1:#D3D1C7; --t2:#B4B2A9; --t3:#888780; --t4:#5F5E5A;
+    --blue:#378ADD; --amber:#BA7517; --amber-l:#EF9F27; --red:#E24B4A;
+    --panel-r:44; --panel-g:44; --panel-b:42; --panel-a:0.72;
+    --panel-a-flash:0.30;
+    --bub-a:0.35;
+    --stroke:rgba(255,255,255,0.13);
+    --stroke-strong:rgba(255,255,255,0.26);
+    --r-panel:18px; --r-card:11px; --r-bub:11px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    display:flex; background:#111; color:var(--t1);
+    font-family:"Segoe UI","Microsoft YaHei",system-ui,-apple-system,sans-serif;
+    font-size:13px; line-height:1.6; overflow:hidden;
+  }
+
+  /* ---------- 模拟桌面 ---------- */
+  .desktop{position:relative;flex:1;min-width:0;overflow:hidden}
+  .wp{position:absolute;inset:0}
+  .wp i{position:absolute;display:block;border-radius:50%}
+  body[data-wp="dark"] .wp{background:#141618}
+  body[data-wp="dark"] .s1{width:480px;height:480px;left:-90px;top:-140px;background:#1c2126}
+  body[data-wp="dark"] .s2{width:720px;height:260px;right:-120px;top:16%;border-radius:40px;background:#191d22}
+  body[data-wp="dark"] .s3{width:360px;height:360px;right:12%;bottom:-120px;background:#1f252b}
+  body[data-wp="dark"] .s4{width:520px;height:200px;left:4%;bottom:4%;border-radius:32px;background:#1a1e23}
+  body[data-wp="dark"] .s5{width:220px;height:220px;left:44%;top:6%;background:#202830}
+  body[data-wp="light"] .wp{background:#e9e7e2}
+  body[data-wp="light"] .s1{width:480px;height:480px;left:-90px;top:-140px;background:#dedbd4}
+  body[data-wp="light"] .s2{width:720px;height:260px;right:-120px;top:16%;border-radius:40px;background:#e2dfd8}
+  body[data-wp="light"] .s3{width:360px;height:360px;right:12%;bottom:-120px;background:#d8d5ce}
+  body[data-wp="light"] .s4{width:520px;height:200px;left:4%;bottom:4%;border-radius:32px;background:#e4e1da}
+  body[data-wp="light"] .s5{width:220px;height:220px;left:44%;top:6%;background:#dcd9d2}
+  body[data-wp="busy"] .wp{background:#33363c}
+  body[data-wp="busy"] .s1{width:480px;height:480px;left:-90px;top:-140px;background:#3f6d63}
+  body[data-wp="busy"] .s2{width:720px;height:260px;right:-120px;top:16%;border-radius:40px;background:#7a4a5e}
+  body[data-wp="busy"] .s3{width:360px;height:360px;right:12%;bottom:-120px;background:#4a5f8a}
+  body[data-wp="busy"] .s4{width:560px;height:220px;left:4%;bottom:4%;border-radius:32px;background:#bfa53f}
+  body[data-wp="busy"] .s5{width:220px;height:220px;left:44%;top:6%;background:#8a4f4f}
+
+  .icons{position:absolute;left:22px;top:22px;display:flex;flex-direction:column;gap:16px;opacity:.5}
+  .icon{display:flex;flex-direction:column;align-items:center;gap:5px;width:60px}
+  .icon i{display:block;width:34px;height:34px;border-radius:7px;background:rgba(255,255,255,.18)}
+  body[data-wp="light"] .icon i{background:rgba(0,0,0,.16)}
+  body[data-wp="light"] .icon span{color:#4a4844}
+  .icon span{font-size:11px;color:#9a978f}
+  .cap{position:absolute;left:22px;bottom:16px;font-size:11px;color:rgba(255,255,255,.22);letter-spacing:.02em}
+  body[data-wp="light"] .cap{color:rgba(0,0,0,.28)}
+
+  /* ---------- 折叠条 ---------- */
+  .bar{
+    position:absolute;display:flex;align-items:center;gap:9px;
+    height:40px;padding:0 14px;border-radius:var(--r-card);
+    background:rgba(var(--panel-r),var(--panel-g),var(--panel-b),var(--panel-a));
+    border:.5px solid var(--stroke);cursor:grab;
+    overflow:hidden;user-select:none;
+    transition:background-color 180ms ease, border-color 180ms ease;
+  }
+  .bar:active{cursor:grabbing}
+  .bar-mark{width:2px;height:15px;border-radius:2px;background:transparent;flex:none;transition:background-color 180ms ease}
+  .bar.unread .bar-mark{background:var(--amber-l)}
+  .bar-text{display:flex;min-width:0;overflow:hidden;white-space:nowrap}
+  .bar-name{color:var(--t3);flex:none}
+  .bar-body{color:var(--t2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .bar.unread .bar-name{color:var(--t2)}
+  .bar.unread .bar-body{color:var(--t1);font-weight:500}
+  @keyframes barflash{
+    0%,100%{background-color:rgba(var(--panel-r),var(--panel-g),var(--panel-b),var(--panel-a));border-color:var(--stroke)}
+    50%{background-color:rgba(var(--panel-r),var(--panel-g),var(--panel-b),var(--panel-a-flash));border-color:var(--stroke-strong)}
+  }
+  .bar.flashing{animation:barflash 600ms ease-in-out 3}
+
+  /* ---------- 展开面板 ---------- */
+  .panel{
+    position:absolute;display:none;flex-direction:column;
+    width:584px;height:500px;border-radius:var(--r-panel);
+    background:rgba(var(--panel-r),var(--panel-g),var(--panel-b),var(--panel-a));
+    border:.5px solid var(--stroke);overflow:hidden;
+  }
+  .panel.open{display:flex}
+
+  .tabs{display:flex;align-items:center;gap:4px;height:42px;padding:0 10px 0 12px;flex:none;border-bottom:.5px solid var(--stroke)}
+  .tabs-drag{flex:1;display:flex;gap:4px;min-width:0;overflow:hidden}
+  .tab{
+    display:flex;align-items:center;gap:6px;height:26px;padding:0 11px;flex:none;
+    border-radius:8px;color:var(--t2);font-size:12px;cursor:pointer;white-space:nowrap;
+    border:.5px solid transparent;
+  }
+  .tab:hover{background:rgba(255,255,255,.05)}
+  .tab.active{color:var(--t1);background:rgba(255,255,255,.08);border-color:var(--stroke)}
+  .tab .dot{width:2px;height:11px;border-radius:2px;background:transparent}
+  .tab.unread .dot{background:var(--amber-l)}
+  .tab.muted{color:var(--t3)}
+  .tab.muted em{font-style:normal;font-size:10px;color:var(--t4);border:.5px solid var(--t4);border-radius:3px;padding:0 3px}
+  .tab.more{color:var(--t2);padding:0 9px;letter-spacing:1px}
+  .btn-collapse{
+    width:24px;height:24px;flex:none;border-radius:7px;border:.5px solid transparent;
+    background:transparent;color:var(--t3);cursor:pointer;font-size:11px;line-height:1;
+  }
+  .btn-collapse:hover{background:rgba(255,255,255,.06);color:var(--t1)}
+  .btn-lock{width:auto;padding:0 8px;font-size:11px}
+  .btn-lock.on{color:var(--amber-l);background:rgba(239,159,39,.13);border-color:rgba(239,159,39,.35)}
+
+  .msgs{flex:1;overflow-y:auto;padding:12px 14px 6px;display:flex;flex-direction:column;gap:9px}
+  .msgs::-webkit-scrollbar{width:6px}
+  .msgs::-webkit-scrollbar-thumb{background:rgba(255,255,255,.12);border-radius:3px}
+  .day{align-self:center;font-size:11px;color:var(--t4);padding:2px 0 4px}
+  .row{display:flex;gap:8px;align-items:flex-start;max-width:100%}
+  .row.me{flex-direction:row-reverse}
+  .av{
+    width:26px;height:26px;border-radius:50%;flex:none;display:flex;align-items:center;justify-content:center;
+    font-size:11px;color:#fff;background:#5F5E5A;
+  }
+  .col{display:flex;flex-direction:column;gap:3px;min-width:0}
+  .row.me .col{align-items:flex-end}
+  .who{font-size:11px;color:var(--t3);padding:0 2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:200px}
+  /* 同一人连续发言合并：首条标名，后续条目只留缩进，不再重复头像与名字 */
+  .row.cont{padding-left:34px}
+  .row.cont .av,.row.cont .who{display:none}
+  .bub{
+    padding:7px 11px;border-radius:var(--r-bub);font-size:13px;color:var(--t1);
+    background:rgba(255,255,255,calc(var(--bub-a) * 0.22));
+    border:.5px solid rgba(255,255,255,calc(var(--bub-a) * 0.42));
+    max-width:330px;word-break:break-word;
+  }
+  .row.me .bub{
+    background:rgba(55,138,221,var(--bub-a));
+    border-color:rgba(133,183,235,calc(var(--bub-a) * 0.9));
+    color:#EDF4FE;
+  }
+  .bub.atme{border-color:rgba(239,159,39,calc(var(--bub-a) * 1.4))}
+  .atme-tag{font-size:11px;color:var(--amber-l);padding:0 2px}
+  .thumb{
+    width:148px;height:92px;border-radius:var(--r-bub);
+    background:rgba(255,255,255,calc(var(--bub-a) * 0.22));
+    border:.5px solid rgba(255,255,255,calc(var(--bub-a) * 0.42));
+    display:flex;align-items:center;justify-content:center;color:var(--t3);font-size:11px;
+    gap:6px;
+  }
+  .thumb i{display:block;width:26px;height:20px;border-radius:3px;border:.5px solid var(--t3);position:relative}
+  .thumb i::after{content:"";position:absolute;left:4px;bottom:3px;width:8px;height:8px;border-radius:50%;background:var(--t3)}
+  .row.recalled .bub{opacity:.42;text-decoration:line-through;text-decoration-color:rgba(255,255,255,.25)}
+  .row.recalled .who{color:var(--t4)}
+  .recall-note{font-size:11px;color:var(--t4);padding:0 2px}
+
+  .composer{position:relative;z-index:2;flex:none;border-top:.5px solid var(--stroke);padding:9px 12px 7px;display:flex;flex-direction:column;gap:6px;background:rgba(var(--panel-r),var(--panel-g),var(--panel-b),var(--panel-a))}
+  .cbox{display:flex;align-items:flex-end;gap:8px}
+  .input{
+    flex:1;min-height:32px;max-height:88px;overflow-y:auto;padding:6px 9px;font-size:13px;line-height:1.55;
+    color:var(--t1);outline:none;border-radius:9px;
+    background:rgba(255,255,255,calc(var(--bub-a) * 0.16));
+    border:.5px solid var(--stroke);
+  }
+  .input:empty::before{content:attr(data-ph);color:var(--t4)}
+  .tok{color:var(--amber-l)}
+  .send{
+    flex:none;height:32px;padding:0 15px;border-radius:9px;cursor:pointer;
+    font-family:inherit;font-size:13px;color:var(--t2);
+    background:rgba(255,255,255,.055);border:.5px solid var(--stroke);
+    opacity:.4;transition:opacity 160ms ease,background-color 160ms ease;
+  }
+  .send.ready{opacity:1}
+  .send:hover{background:rgba(255,255,255,.1)}
+  .hint{font-size:11px;color:var(--t4)}
+
+  /* ---------- 溢出菜单 ---------- */
+  .overflow{
+    position:absolute;left:0;right:0;top:42px;bottom:0;display:none;
+    background:rgba(28,28,27,.95);
+    padding:10px 12px;overflow-y:auto;
+  }
+  .overflow.open{display:block}
+  .ov-head{font-size:11px;color:var(--t4);padding:2px 4px 8px}
+  .ov-item{
+    display:flex;align-items:center;gap:10px;height:36px;padding:0 10px;border-radius:9px;cursor:pointer;
+    border:.5px solid transparent;
+  }
+  .ov-item:hover{background:rgba(255,255,255,.06)}
+  .ov-item.unread .ov-name{color:var(--t1);font-weight:500}
+  .ov-item.unread .ov-mark{background:var(--amber-l)}
+  .ov-mark{width:2px;height:13px;border-radius:2px;flex:none;background:transparent}
+  .ov-name{font-size:13px;color:var(--t2);flex:none;width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .ov-last{font-size:12px;color:var(--t3);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .ov-pin{font-size:11px;color:var(--t4);flex:none}
+
+  /* ---------- 控制面板 ---------- */
+  .side{
+    width:308px;flex:none;background:#1b1b19;border-left:.5px solid rgba(255,255,255,.08);
+    padding:18px 18px 26px;overflow-y:auto;
+  }
+  .side h1{font-size:14px;font-weight:500;color:#E8E6DF;margin-bottom:3px}
+  .side .sub{font-size:11px;color:var(--t4);margin-bottom:18px}
+  .grp{margin-bottom:18px}
+  .grp>h2{font-size:11px;font-weight:500;color:var(--t3);letter-spacing:.04em;margin-bottom:9px}
+  .btns{display:flex;flex-wrap:wrap;gap:6px}
+  .b{
+    height:28px;padding:0 11px;border-radius:8px;cursor:pointer;font-family:inherit;font-size:12px;
+    color:#C6C4BB;background:rgba(255,255,255,.055);border:.5px solid rgba(255,255,255,.1);
+  }
+  .b:hover{background:rgba(255,255,255,.1)}
+  .b.on{color:#0E0E0D;background:#B4B2A9;border-color:#B4B2A9}
+  .sld{display:flex;align-items:center;gap:10px;margin:7px 0}
+  .sld label{font-size:12px;color:var(--t2);flex:none;width:82px}
+  .sld input[type=range]{flex:1;accent-color:#888780;height:2px}
+  .sld .v{font-size:11px;color:var(--t4);width:38px;text-align:right;flex:none}
+  .chk{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--t2);margin:8px 0 0;cursor:pointer}
+  .chk input{accent-color:#888780}
+  .note{font-size:11px;color:var(--t4);line-height:1.7;margin-top:6px}
+  .note b{color:var(--t3);font-weight:500}
+  .demo-note{font-size:11px;color:var(--t4);padding:8px 10px;border:.5px dashed rgba(255,255,255,.13);border-radius:8px;margin-top:8px}
+</style>
+</head>
+<body data-wp="dark">
+
+<div class="desktop" id="desktop">
+  <div class="wp"><i class="s1"></i><i class="s2"></i><i class="s3"></i><i class="s4"></i><i class="s5"></i></div>
+
+  <div class="icons">
+    <div class="icon"><i></i><span>此电脑</span></div>
+    <div class="icon"><i></i><span>回收站</span></div>
+    <div class="icon"><i></i><span>项目</span></div>
+  </div>
+
+  <div class="bar" id="bar" style="width:264px">
+    <div class="bar-mark"></div>
+    <div class="bar-text">
+      <span class="bar-name" id="barName">小陈：</span>
+      <span class="bar-body" id="barBody">今天几点到？</span>
+    </div>
+  </div>
+
+  <div class="panel" id="panel">
+    <div class="tabs">
+      <div class="tabs-drag" id="tabsDrag">
+        <div class="tab unread" data-t="1"><span class="dot"></span>小陈</div>
+        <div class="tab active" data-t="2"><span class="dot"></span>大前端交流群</div>
+        <div class="tab muted" data-t="3"><span class="dot"></span>产品组 <em>静音</em></div>
+        <div class="tab more" id="tabMore">···</div>
+      </div>
+      <button class="btn-collapse btn-lock" id="btnLock" title="未锁定：点击抽屉外部自动收起">锁定</button>
+      <button class="btn-collapse" id="btnCollapse" title="收起">▲</button>
+    </div>
+
+    <div class="msgs">
+      <div class="day">今天 14:02</div>
+
+      <div class="row">
+        <div class="av" style="background:#7F77DD">李</div>
+        <div class="col">
+          <div class="who">李工</div>
+          <div class="bub atme">@你 那个接口的字段名定了没？</div>
+          <div class="atme-tag">有人 @ 你</div>
+        </div>
+      </div>
+
+      <div class="row me">
+        <div class="col">
+          <div class="bub">定了，晚点同步到文档</div>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="av" style="background:#1D9E75">陈</div>
+        <div class="col">
+          <div class="who">小陈</div>
+          <div class="bub">顺便把错误码表也带上</div>
+        </div>
+      </div>
+
+      <div class="row cont">
+        <div class="av"></div>
+        <div class="col">
+          <div class="who">小陈</div>
+          <div class="thumb"><i></i>图片</div>
+        </div>
+      </div>
+
+      <div class="row recalled">
+        <div class="av" style="background:#5F5E5A">王</div>
+        <div class="col">
+          <div class="who">王姐</div>
+          <div class="bub">刚才发错了</div>
+          <div class="recall-note">已撤回 · 原文保留，可手动删除</div>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="av" style="background:#534AB7">王</div>
+        <div class="col">
+          <div class="who">王姐</div>
+          <div class="bub">明早十点对一下</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="overflow" id="overflow">
+      <div class="ov-head">未放进标签栏的会话</div>
+      <div class="ov-item unread" data-pin="老王">
+        <span class="ov-mark"></span>
+        <span class="ov-name">老王</span>
+        <span class="ov-last">在吗？帮我看看这个报错</span>
+        <span class="ov-pin">加入标签</span>
+      </div>
+      <div class="ov-item">
+        <span class="ov-mark"></span>
+        <span class="ov-name">室友群</span>
+        <span class="ov-last">周六爬山有人去吗</span>
+        <span class="ov-pin">加入标签</span>
+      </div>
+      <div class="ov-item">
+        <span class="ov-mark"></span>
+        <span class="ov-name">家电维修</span>
+        <span class="ov-last">好的，明天上午上门</span>
+        <span class="ov-pin">加入标签</span>
+      </div>
+      <div class="ov-item">
+        <span class="ov-mark"></span>
+        <span class="ov-name">读书会</span>
+        <span class="ov-last">下周分享主题投票</span>
+        <span class="ov-pin">加入标签</span>
+      </div>
+    </div>
+
+    <div class="composer">
+      <div class="cbox">
+        <div class="input" id="input" contenteditable="true" data-ph="发消息…"></div>
+        <button class="send" id="send">发送</button>
+      </div>
+      <div class="hint">Enter 发送 · Ctrl+Enter 换行 · 粘贴剪贴板图片直接作为 [图片] 发送</div>
+    </div>
+  </div>
+
+  <div class="cap" id="cap">模拟桌面 · 折叠条可拖动 · 展开就地展开不平移 · 未锁定时点桌面空白处自动收起</div>
+</div>
+
+<aside class="side">
+  <h1>QQ 抽屉 · 形态预览</h1>
+  <div class="sub">纯视觉演示，不含真实通信逻辑</div>
+
+  <div class="grp">
+    <h2>形态</h2>
+    <div class="btns">
+      <button class="b" id="bToggle">展开 / 收起</button>
+      <button class="b" id="bReset">复位位置</button>
+    </div>
+    <div class="sld">
+      <label>折叠条宽度</label>
+      <input type="range" id="rBarW" min="180" max="420" value="264">
+      <span class="v" id="vBarW">264</span>
+    </div>
+    <div class="note">超宽内容直接省略号，<b>不做自适应宽度</b>——新消息永远不会改变窗口尺寸。</div>
+  </div>
+
+  <div class="grp">
+    <h2>窗口行为</h2>
+    <div class="btns">
+      <button class="b" id="bLock">锁定展开</button>
+    </div>
+    <div class="note">
+      · 展开时<b>不改变窗口位置</b>：面板以折叠条左上角为锚点就地展开，不再翻转到别处<br>
+      · 锚点=窗口左上角；仅当展开后会超出屏幕时才做最小必要位移（最后一道保险，正常摆放不会触发）<br>
+      · <b>未锁定</b>时点击抽屉外的桌面区域即视为失去焦点 → 自动收起（侧边这块是演示控制台，不算）<br>
+      · 锁定后展开常驻，点外部不收起，需按 <b>▲</b> 或再点一次「锁定」解锁
+    </div>
+  </div>
+
+  <div class="grp">
+    <h2>消息到达</h2>
+    <div class="btns">
+      <button class="b" id="bNormal">非静音会话</button>
+      <button class="b" id="bMuted">静音会话</button>
+    </div>
+    <div class="demo-note" id="demoNote">点上面两个按钮，看折叠条的两种反应。</div>
+  </div>
+
+  <div class="grp">
+    <h2>透明度</h2>
+    <div class="sld">
+      <label>面板底</label>
+      <input type="range" id="rPanel" min="30" max="95" value="72">
+      <span class="v" id="vPanel">72</span>
+    </div>
+    <div class="btns">
+      <button class="b" data-a="90">清晰 90</button>
+      <button class="b on" data-a="72">半透 72</button>
+      <button class="b" data-a="45">通透 45</button>
+    </div>
+    <div class="sld" style="margin-top:14px">
+      <label>气泡底</label>
+      <input type="range" id="rBub" min="8" max="70" value="35">
+      <span class="v" id="vBub">35</span>
+    </div>
+    <label class="chk"><input type="checkbox" id="cComp" checked>可读性补偿</label>
+    <div class="note">气泡与面板<b>各自独立</b>。开了补偿后，面板越透、底色越深，用来顶住文字对比度。</div>
+  </div>
+
+  <div class="grp">
+    <h2>壁纸</h2>
+    <div class="btns">
+      <button class="b on" data-wp="dark">深色</button>
+      <button class="b" data-wp="light">浅色</button>
+      <button class="b" data-wp="busy">花哨</button>
+    </div>
+    <div class="note">切到「花哨」把面板调透，能看到薄描边在维持气泡边界上的作用。切到「浅色」再调透，会明显感到对比度吃紧——这正是"越透就把底色压得越深"这条补偿规则存在的原因。</div>
+  </div>
+
+  <div class="grp">
+    <h2>输入框</h2>
+    <div class="btns">
+      <button class="b" id="bImg">粘贴图片</button>
+      <button class="b" id="bAt">插入 @</button>
+      <button class="b" id="bClear">清空</button>
+    </div>
+    <div class="note">两种令牌都只显示<b>纯文字</b>（<span style="color:#EF9F27">[图片]</span> / <span style="color:#EF9F27">@李工</span>），不做缩略图预览。发送按钮始终不高亮，只用不透明度区分是否可发。</div>
+  </div>
+
+  <div class="grp">
+    <h2>溢出菜单</h2>
+    <div class="btns">
+      <button class="b" id="bMore">展开 ···</button>
+    </div>
+    <div class="note">点标签栏的 <b>···</b> 也能打开。向下展开覆盖消息区、失去焦点自动收回，不改变窗口尺寸。</div>
+  </div>
+
+  <div class="grp">
+    <h2>本版已体现的规则</h2>
+    <div class="note">
+      · 折叠条无头像，只有「谁：说了什么」<br>
+      · 群聊每条消息显示<b>发送者名字</b>与头像；同一人连续发言合并成组，只在首条标名<br>
+      · 闪烁 3 次（600ms×3）后留下轻微痕迹（字重+亮度+2px 竖条）<br>
+      · 静音会话不闪不留痕，只静默更新折叠条<br>
+      · 标签顺序固定，新会话追加末尾，可手动拖排<br>
+      · 已撤回消息保留原文并打标，可手动删除<br>
+      · 展开就地不位移；未锁定时失去焦点自动收起<br>
+      · 全窗口不在任务栏、不闪任务栏、无声音提醒
+    </div>
+  </div>
+</aside>
+
+<script>
+(function(){
+  var S = document.documentElement.style;
+  var bar = document.getElementById('bar');
+  var panel = document.getElementById('panel');
+  var desktop = document.getElementById('desktop');
+  var input = document.getElementById('input');
+  var sendBtn = document.getElementById('send');
+  var pos = {x:60, y:0};
+
+  function layout(){
+    var W = desktop.clientWidth, H = desktop.clientHeight;
+    pos.x = Math.min(Math.max(20, pos.x), Math.max(20, W - bar.offsetWidth - 20));
+    pos.y = Math.min(Math.max(20, pos.y), Math.max(20, H - bar.offsetHeight - 20));
+    bar.style.left = pos.x + 'px';
+    bar.style.top = pos.y + 'px';
+    if (panel.classList.contains('open')) placePanel();
+  }
+
+  // 展开不改变窗口位置：面板以折叠条的左上角为锚点，就地向右下展开。
+  // 只有当展开后会超出可视区时，才做「最小必要位移」把它推回来（最后一道保险）。
+  function placePanel(){
+    var W = desktop.clientWidth, H = desktop.clientHeight;
+    var pw = panel.offsetWidth, ph = panel.offsetHeight;
+    var left = pos.x, top = pos.y;
+    if (left + pw > W - 16) left = Math.max(16, W - pw - 16);
+    if (top + ph > H - 16) top = Math.max(16, H - ph - 16);
+    panel.style.left = left + 'px';
+    panel.style.top = top + 'px';
+  }
+
+  function open(){
+    var bh = bar.offsetHeight || 40;  // 隐藏前先取高度，否则测到 0
+    bar.style.display = 'none';
+    panel.classList.add('open');
+    placePanel();
+  }
+  function close(){
+    panel.classList.remove('open');
+    document.getElementById('overflow').classList.remove('open');
+    bar.style.display = 'flex';
+    layout();
+  }
+
+  // ---------- 锁定 / 失去焦点自动收起 ----------
+  var locked = false;
+  var btnLock = document.getElementById('btnLock');
+  var bLock = document.getElementById('bLock');
+  function setLock(v){
+    locked = v;
+    btnLock.classList.toggle('on', locked);
+    bLock.classList.toggle('on', locked);
+    btnLock.title = locked ? '已锁定：点击抽屉外部不会自动收起' : '未锁定：点击抽屉外部自动收起';
+  }
+  setLock(false);
+  btnLock.addEventListener('click', function(e){ e.stopPropagation(); setLock(!locked); });
+  bLock.addEventListener('click', function(){ setLock(!locked); });
+  // 点击抽屉外的桌面区域 = 失去焦点（真实实现里由窗口 blur 事件触发）
+  document.addEventListener('mousedown', function(e){
+    if (!panel.classList.contains('open') || locked) return;
+    if (e.target.closest('.bar') || e.target.closest('.panel')) return;
+    if (e.target.closest('.side')) return;   // 侧栏是演示控制台，不算失焦
+    close();
+  });
+
+  document.getElementById('btnCollapse').addEventListener('click', close);
+  bar.addEventListener('click', function(e){
+    if (bar.dataset.dragged === '1') { bar.dataset.dragged = '0'; return; }
+    open();
+  });
+
+  // 折叠条拖动
+  var drag = null;
+  function startDrag(e){
+    if (e.target.closest('.tabs') || e.target.closest('.tab')) return;
+    var isBar = !!e.target.closest('.bar');
+    var r = isBar ? bar : panel;
+    drag = {x: e.clientX, y: e.clientY, ox: parseInt(r.style.left, 10) || pos.x, oy: parseInt(r.style.top, 10) || pos.y, isBar: isBar};
+    e.preventDefault();
+  }
+  document.addEventListener('mousedown', function(e){
+    if (e.target.closest('.bar') || e.target.closest('.tabs-drag') || e.target.closest('.tabs')) startDrag(e);
+  });
+  document.addEventListener('mousemove', function(e){
+    if (!drag) return;
+    var dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    if (Math.abs(dx) + Math.abs(dy) > 3 && drag.isBar) bar.dataset.dragged = '1';
+    pos.x = drag.ox + dx; pos.y = drag.oy + dy;
+    layout();
+  });
+  document.addEventListener('mouseup', function(){ drag = null; });
+
+  // 透明度
+  function applyPanel(a){
+    S.setProperty('--panel-a', a);
+    S.setProperty('--panel-a-flash', Math.max(0.06, a * 0.42));
+    // 可读性补偿：越透，底色越深
+    var comp = document.getElementById('cComp').checked;
+    if (comp){
+      var k = Math.min(1, Math.max(0, (a - 0.30) / 0.60));
+      S.setProperty('--panel-r', Math.round(26 + 18 * k));
+      S.setProperty('--panel-g', Math.round(26 + 18 * k));
+      S.setProperty('--panel-b', Math.round(25 + 17 * k));
+    } else {
+      S.setProperty('--panel-r', 44); S.setProperty('--panel-g', 44); S.setProperty('--panel-b', 42);
+    }
+  }
+  var rPanel = document.getElementById('rPanel');
+  rPanel.addEventListener('input', function(){
+    var a = rPanel.value / 100;
+    document.getElementById('vPanel').textContent = rPanel.value;
+    applyPanel(a);
+    document.querySelectorAll('[data-a]').forEach(function(b){ b.classList.remove('on'); });
+  });
+  document.querySelectorAll('[data-a]').forEach(function(b){
+    b.addEventListener('click', function(){
+      var a = parseInt(b.dataset.a, 10) / 100;
+      rPanel.value = b.dataset.a;
+      document.getElementById('vPanel').textContent = b.dataset.a;
+      applyPanel(a);
+      document.querySelectorAll('[data-a]').forEach(function(x){ x.classList.remove('on'); });
+      b.classList.add('on');
+    });
+  });
+  var rBub = document.getElementById('rBub');
+  rBub.addEventListener('input', function(){
+    S.setProperty('--bub-a', rBub.value / 100);
+    document.getElementById('vBub').textContent = rBub.value;
+  });
+  document.getElementById('cComp').addEventListener('change', function(){
+    applyPanel(rPanel.value / 100);
+  });
+
+  // 壁纸
+  document.querySelectorAll('[data-wp]').forEach(function(b){
+    b.addEventListener('click', function(){
+      document.body.dataset.wp = b.dataset.wp;
+      document.querySelectorAll('[data-wp]').forEach(function(x){ x.classList.remove('on'); });
+      b.classList.add('on');
+    });
+  });
+
+  // 折叠条宽度
+  var rBarW = document.getElementById('rBarW');
+  rBarW.addEventListener('input', function(){
+    bar.style.width = rBarW.value + 'px';
+    document.getElementById('vBarW').textContent = rBarW.value;
+    layout();
+  });
+
+  // 消息到达
+  var barName = document.getElementById('barName'), barBody = document.getElementById('barBody');
+  var demoNote = document.getElementById('demoNote');
+  function flash(){
+    bar.classList.remove('flashing');
+    void bar.offsetWidth;
+    bar.classList.add('flashing');
+  }
+  bar.addEventListener('animationend', function(){ bar.classList.remove('flashing'); });
+  document.getElementById('bNormal').addEventListener('click', function(){
+    barName.textContent = '小陈：';
+    barBody.textContent = '你到了跟我说一声，我下去接你';
+    bar.classList.add('unread');
+    flash();
+    demoNote.textContent = '非静音：整窗闪烁 3 次 → 静止，留下轻微痕迹（字重 + 亮度 + 左侧 2px 竖条）。';
+  });
+  document.getElementById('bMuted').addEventListener('click', function(){
+    barName.textContent = '产品组 · 老王：';
+    barBody.textContent = '这份原型下周再评审吧';
+    bar.classList.remove('unread');
+    demoNote.textContent = '静音：不闪、不留痕，只把折叠条内容静默换成它的最新一条。注意此时它不会挤掉上面的非静音提示。';
+  });
+
+  // 溢出菜单
+  var overflow = document.getElementById('overflow');
+  function toggleOverflow(){ overflow.classList.toggle('open'); }
+  document.getElementById('bMore').addEventListener('click', toggleOverflow);
+  document.getElementById('tabMore').addEventListener('click', function(e){ e.stopPropagation(); toggleOverflow(); });
+  document.addEventListener('mousedown', function(e){
+    if (overflow.classList.contains('open') && !e.target.closest('#overflow') && !e.target.closest('#tabMore')) {
+      overflow.classList.remove('open');
+    }
+  });
+  document.querySelectorAll('.ov-item').forEach(function(it){
+    it.addEventListener('click', function(){
+      // 手动加入标签：手动优先，挤掉队尾的非钉住标签
+      var name = it.dataset.pin;
+      var tabsDrag = document.getElementById('tabsDrag');
+      var tabs = Array.prototype.slice.call(tabsDrag.querySelectorAll('.tab:not(.more)'));
+      if (tabs.length >= 4) { tabs[tabs.length - 1].remove(); }
+      var t = document.createElement('div');
+      t.className = 'tab unread';
+      t.innerHTML = '<span class="dot"></span>' + name;
+      t.dataset.pin = '1';
+      tabsDrag.insertBefore(t, document.getElementById('tabMore'));
+      overflow.classList.remove('open');
+    });
+  });
+
+  // 标签切换
+  document.getElementById('tabsDrag').addEventListener('click', function(e){
+    var t = e.target.closest('.tab');
+    if (!t || t.id === 'tabMore') return;
+    document.querySelectorAll('.tab').forEach(function(x){ x.classList.remove('active'); });
+    t.classList.add('active');
+    t.classList.remove('unread');
+    t.querySelector('.dot').style.background = '';
+  });
+
+  // 输入框
+  function refreshSend(){
+    var has = input.textContent.trim().length > 0;
+    sendBtn.classList.toggle('ready', has);
+  }
+  input.addEventListener('input', refreshSend);
+  input.addEventListener('keydown', function(e){
+    if (e.key === 'Enter' && !e.ctrlKey){ e.preventDefault(); doSend(); }
+  });
+  function doSend(){
+    if (!input.textContent.trim()) return;
+    input.innerHTML = '';
+    refreshSend();
+  }
+  sendBtn.addEventListener('click', doSend);
+  document.getElementById('bImg').addEventListener('click', function(){
+    input.innerHTML += '<span class="tok">[图片]</span> ';
+    refreshSend();
+  });
+  document.getElementById('bAt').addEventListener('click', function(){
+    input.innerHTML += '<span class="tok">@李工</span> ';
+    refreshSend();
+  });
+  document.getElementById('bClear').addEventListener('click', function(){
+    input.innerHTML = ''; refreshSend();
+  });
+
+  document.getElementById('bToggle').addEventListener('click', function(){
+    if (panel.classList.contains('open')) close(); else open();
+  });
+  document.getElementById('bReset').addEventListener('click', function(){
+    pos.x = 60; pos.y = 0;
+    bar.style.width = '264px'; rBarW.value = 264; document.getElementById('vBarW').textContent = '264';
+    layout();
+  });
+
+  window.addEventListener('resize', layout);
+  // 默认位置选在展开后面板能完整落下的地方，方便看清「就地展开、窗口不位移」
+  pos.x = 64;
+  pos.y = Math.max(40, Math.round(desktop.clientHeight * 0.20));
+  applyPanel(0.72);
+  layout();
+  if (location.hash.indexOf('open') >= 0) open();
+  if (location.hash.indexOf('locked') >= 0) setLock(true);
+  if (location.hash.indexOf('more') >= 0) overflow.classList.add('open');
+  ['light', 'busy'].forEach(function(w){
+    if (location.hash.indexOf(w) >= 0) {
+      document.body.dataset.wp = w;
+      document.querySelectorAll('[data-wp]').forEach(function(x){ x.classList.toggle('on', x.dataset.wp === w); });
+    }
+  });
+})();
+</script>
+</body>
+</html>
