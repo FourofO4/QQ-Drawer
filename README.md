@@ -217,7 +217,7 @@ NapCat 是"无头 QQ"本体：它自己登录 QQ，再把标准 OneBot 11 接口
 3. **保持手机 QQ 在线**。NapCat 在线时电脑端 QQ 客户端会被互踢，这正是我们要的效果。
 
 > 启动就报 `Error: The specified module could not be found …wrapper.node`（winerror 126）？
-> 不是你装错了——官方包本身缺文件，见 [§5.1](#51-napcat-启动即崩-winerror-126)。
+> 不是你装错了——官方包本身缺文件，见 [§5.1](#51-napcat-启动即崩winerror-126)。
 
 ### 2.2 开一个 WebSocket 服务器
 
