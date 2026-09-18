@@ -65,16 +65,45 @@ pub fn should_retry(auto_reconnect: bool, attempt: u32) -> bool {
     auto_reconnect || attempt == 0
 }
 
+/// URL 是否只有 scheme + authority（没有路径部分），例如 `ws://127.0.0.1:3001`。
+///
+/// 判据是 authority 之后第一个出现的 `/` `?` `#`：见到 `/` 才说明有路径。
+fn has_no_path(url: &str) -> bool {
+    let after_scheme = match url.find("://") {
+        Some(i) => &url[i + 3..],
+        None => url,
+    };
+    match after_scheme.find(['/', '?', '#']) {
+        Some(i) => after_scheme.as_bytes()[i] == b'?',
+        None => true,
+    }
+}
+
 /// 把 `access_token` 拼进 URL（NFR-11：连接必须带 token）。
 ///
 /// NapCat 两种都认：`?access_token=` 查询串，以及 `Authorization: Bearer` 头。
 /// 两个都带上——某些反向代理会吃掉其中一个。
+///
+/// 注意无路径的地址要**先补一个 `/`**：`ws://127.0.0.1:3001` 直接拼查询串会得到
+/// `ws://127.0.0.1:3001?access_token=…`，`http::Uri` 把路径解析成空串，tungstenite
+/// 于是写出 `GET ?access_token=… HTTP/1.1`——请求行缺开头的 `/`，不是合法的
+/// origin-form，NapCat 的 HTTP 解析层直接回 `400 Bad Request`，表现为连不上。
 pub fn with_token(url: &str, token: &str) -> String {
     if token.is_empty() || url.contains("access_token=") {
         return url.to_string();
     }
-    let sep = if url.contains('?') { '&' } else { '?' };
-    format!("{url}{sep}access_token={token}")
+    // 补 `/` 时要注意插在 authority 之后、查询串**之前**：
+    // `ws://host?x=1` 要变成 `ws://host/?x=1`，直接拼在末尾会得到 `ws://host?x=1/`。
+    let base = if has_no_path(url) {
+        match url.find(['?', '#']) {
+            Some(i) => format!("{}/{}", &url[..i], &url[i..]),
+            None => format!("{url}/"),
+        }
+    } else {
+        url.to_string()
+    };
+    let sep = if base.contains('?') { '&' } else { '?' };
+    format!("{base}{sep}access_token={token}")
 }
 
 /* ------------------------------ 连接生命周期 ------------------------------ */
@@ -142,7 +171,8 @@ async fn session(app: &AppHandle, state: &Arc<AppState>) -> Result<()> {
         .with_context(|| format!("连接失败: {url}"))?;
     tracing::info!(url, "WebSocket 已连接");
 
-    let (mut write, mut read) = stream.split();
+    // 写半边给 writer 任务，读半边给 read_loop（各自独占，不共享）
+    let (mut write, read) = stream.split();
 
     // 出站帧通道。ActionBus 只管把 Value 丢进来，真正的写由下面的任务做。
     let (tx, mut rx) = mpsc::unbounded_channel::<Value>();
@@ -158,6 +188,13 @@ async fn session(app: &AppHandle, state: &Arc<AppState>) -> Result<()> {
             }
         }
     });
+
+    // 读循环**必须先于任何请求跑起来**：`ActionBus::resolve()` 在它里面，下面那串
+    // 初始化请求（get_login_info / get_version_info / resync）等的正是它派发的响应。
+    // 曾经把读循环放在初始化之后，结果这些请求的响应一直没人接、全部超时——
+    // 现象是 self_id 恒为 0（@我 判定退化）且启动时拉不到会话列表，而断开重连后
+    // 反而正常（那时读循环才刚起来）。所以这里必须先 spawn，最后再 await 它的结束原因。
+    let reader = tokio::spawn(read_loop(app.clone(), state.clone(), bus.clone(), read));
 
     // 1) 取 self_id —— @我判定、"自己发的消息"判定都靠它，所以是连接后的第一件事
     match bus.get_login_info().await {
@@ -186,20 +223,27 @@ async fn session(app: &AppHandle, state: &Arc<AppState>) -> Result<()> {
     // 3) 重连补齐（§4.8 #7）
     resync(app, state, &bus).await;
 
-    // 4) 读循环
-    let reason = read_loop(app, state, &bus, &mut read).await;
+    // 4) 收尾：等读循环结束，它就是这条连接的生命周期终点
+    let reason = match reader.await {
+        Ok(r) => r,
+        Err(e) => Err(anyhow::Error::new(e).context("读循环任务异常结束")),
+    };
 
-    // 5) 收尾：停掉写任务，让出站通道立刻关闭（bus 之后会被 run() 摘掉并作废）
+    // 5) 停掉写任务，让出站通道立刻关闭（bus 之后会被 run() 摘掉并作废）
     writer.abort();
     reason
 }
 
 /// 读循环。返回 `Err` 表示断开原因。
+///
+/// 它同时承担两件事：把带 `echo` 的报文派发给 `ActionBus` 的等待者，以及把事件送进
+/// 解析管线。因此它**必须在任何 `bus.call*()` 之前跑起来**——否则请求发出去没人收响应，
+/// 只能等到超时。调用方用 `tokio::spawn` 拉起它，见 `session()`。
 async fn read_loop(
-    app: &AppHandle,
-    state: &Arc<AppState>,
-    bus: &ActionBus,
-    read: &mut futures_util::stream::SplitStream<
+    app: AppHandle,
+    state: Arc<AppState>,
+    bus: ActionBus,
+    mut read: futures_util::stream::SplitStream<
         tokio_tungstenite::WebSocketStream<
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
@@ -241,7 +285,7 @@ async fn read_loop(
         if api::is_response(&parsed) {
             bus.resolve(api::extract_response(&parsed));
         } else {
-            event::handle(app, state, &parsed).await;
+            event::handle(&app, &state, &parsed).await;
         }
     }
 }
@@ -342,12 +386,53 @@ mod tests {
     fn token_拼进查询串() {
         assert_eq!(
             with_token("ws://127.0.0.1:3001", "abc"),
-            "ws://127.0.0.1:3001?access_token=abc"
+            "ws://127.0.0.1:3001/?access_token=abc",
+            "无路径的地址要先补 `/`，否则请求行缺开头的斜杠会被判 400"
         );
         assert_eq!(
             with_token("ws://127.0.0.1:3001/ws?a=1", "abc"),
             "ws://127.0.0.1:3001/ws?a=1&access_token=abc"
         );
+        assert_eq!(
+            with_token("ws://127.0.0.1:3001/", "abc"),
+            "ws://127.0.0.1:3001/?access_token=abc"
+        );
+        assert_eq!(
+            with_token("ws://127.0.0.1:3001?foo=1", "abc"),
+            "ws://127.0.0.1:3001/?foo=1&access_token=abc",
+            "查询串在前、路径仍为空时也要补 `/`"
+        );
+    }
+
+    #[test]
+    fn 拼完token后请求目标一定以斜杠开头() {
+        // 回归：曾经默认 ws_url(`ws://127.0.0.1:3001`) 拼上 token 后得到
+        // `GET ?access_token=… HTTP/1.1`，NapCat 回 400，现象是"连接失败"。
+        for base in [
+            "ws://127.0.0.1:3001",
+            "ws://127.0.0.1:3001/",
+            "wss://example.com",
+            "ws://example.com:8080?x=1",
+            "ws://example.com/ws",
+        ] {
+            let full = with_token(base, "tok");
+            let after_scheme = &full[full.find("://").expect("有 scheme") + 3..];
+            let path_start = after_scheme.find('/').expect("必须有路径部分");
+            assert_eq!(
+                &after_scheme[path_start..path_start + 1],
+                "/",
+                "{base} -> {full} 的请求目标必须以 `/` 开头"
+            );
+        }
+    }
+
+    #[test]
+    fn 无路径判定() {
+        assert!(has_no_path("ws://127.0.0.1:3001"));
+        assert!(has_no_path("ws://127.0.0.1:3001?x=1"));
+        assert!(!has_no_path("ws://127.0.0.1:3001/"));
+        assert!(!has_no_path("ws://127.0.0.1:3001/ws"));
+        assert!(!has_no_path("ws://127.0.0.1:3001/ws?x=1"));
     }
 
     #[test]
