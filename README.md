@@ -279,6 +279,11 @@ npm run dev            # → http://localhost:5173
 npm run tauri dev
 ```
 
+**必须在普通终端启动**（PowerShell / Windows Terminal / CMD），不要从 WorkBuddy
+或其它沙箱 shell 里起。沙箱会拒绝 `%LOCALAPPDATA%\qq-drawer\media\**` 与
+`EBWebView` 临时缓存的写入，导致图片落盘偶发失败（日志里出现 `图片落盘失败`），
+详情见 [§5.6](#56-沙箱里启动导致图片落盘失败)。
+
 连上之后折叠条出现在屏幕右上角，点击展开。首次要填 token，见 [§2.4](#24-把-token-填进抽屉)。
 
 > **退出只有一条路**：托盘图标右键。窗口是 `skipTaskbar: true` + `closable: false`，
