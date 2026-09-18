@@ -336,20 +336,60 @@ npm run tauri build -- --bundles nsis
 | `R:\QQ-Drawer\QQ-Drawer.exe` | 便携版，双击直接跑（需要 WebView2 Runtime，Win10 较新版本已内置） |
 | `R:\QQ-Drawer\QQ-Drawer-Setup.exe` | NSIS 安装包（跑 `build.ps1` 才生成）。**当前用户**安装，开始菜单里有快捷方式 |
 
-> 想放桌面：右键 `QQ-Drawer.exe` → **发送到 → 桌面快捷方式**。不用每次开命令行。
->
-> **装/放完之后不需要命令行。** 抽屉连的还是 `%LOCALAPPDATA%\qq-drawer` 里那份配置，
-> 所以 dev 阶段填好的 `ws_url` / token 会自动沿用。**但 NapCat 仍要在跑**——它是消息来源，
-> 可以给 `R:\NapCat\napcat.bat` 也建个开机自启的快捷方式。
-
 **release 构建很慢**（fat LTO + `opt-level="z"`，首次约 25~30 分钟，且 MinGW ld 链接是瓶颈）。
 `%TEMP%\qq-drawer-target` 里的依赖是缓存复用的，别随手删。
+
+### 4.1 日常启动：双击一个文件就够了
+
+**是的——NapCat 必须先跑起来，它就是那个"服务器"。**
+
+抽屉本身只是个客户端，所有 QQ 消息都从 NapCat 的
+`ws://127.0.0.1:3001` 拿。NapCat 不在，抽屉会一直重连（日志里刷
+`连接中断 error=连接失败 … attempt=0/1/2…`），界面上什么也没有。
+
+**但顺序其实不挑：** 抽屉的重连是指数退避的（0.5s → 1s → 2s → 4s → 8s → 16s …），
+所以你先点抽屉、再起 NapCat 也行，NapCat 上线后几秒内抽屉会自己接上。
+
+懒得管顺序就用这个（`scripts/start.bat` 的副本，放在 exe 旁边）：
+
+```
+R:\QQ-Drawer\Start QQ Drawer.bat
+```
+
+双击它，它会：
+
+1. 用 `netstat` 查 `3001` 有没有在监听，**没在听才**起 NapCat
+   （工作目录 `R:\NapCat`，命令 `node.exe index.js`，等价于 `R:\NapCat\napcat.bat`）。
+   NapCat 约 10~30 秒启动完；**如果 QQ 登录态过期，它那个窗口会打出二维码**，
+   用手机 QQ 扫一下。
+2. 启动 `QQ-Drawer.exe`，剩下的交给它的自动重连。
+
+脚本是纯 ASCII + CRLF（cmd.exe 按 OEM 码页读 `.bat`，中文会变乱码甚至让
+`goto :label` 解析失败），路径写死在文件顶部，NapCat 或 exe 搬家了改那两行就行。
+
+**目前没有配任何开机自启**（`HKCU\...\Run` 里只有 ctfmon / OneDrive / IDM / Docker / Edge）。
+要开机自动跑，手动做一个：`Win+R` → `shell:startup` → 把
+`R:\QQ-Drawer\Start QQ Drawer.bat` 的快捷方式丢进去。
+
+> 想给 exe 单独放桌面：右键 `QQ-Drawer.exe` → **发送到 → 桌面快捷方式**。
+> 单独双击它只开抽屉，不拉 NapCat——NapCat 得另外起。
+>
+> **配置不用重填。** 抽屉连的还是 `%LOCALAPPDATA%\qq-drawer` 里那份，dev 阶段
+> 填好的 `ws_url` / token 会自动沿用。**换机器才需要重填**，见 [§2.4](#24-把-token-填进抽屉)。
 
 ---
 
 ## 5. 排障
 
 按"症状"查。这几条都是本机真实撞过的，不是想象出来的。
+
+> **九成的"连不上"其实是 NapCat 没起。** 日志里刷
+> `连接中断 error=连接失败 ws://127.0.0.1:3001/?access_token=… attempt=0/1/2/3…`
+> 并且间隔按 0.5s → 1s → 2s → 4s → 8s → 16s 拉长，就是这个。
+> 先 `netstat -ano | findstr ":3001" | findstr "LISTENING"` 看一眼，
+> 没输出就去起 NapCat，或者直接双击 §4.1 那个脚本。
+> 注意这条**不是** §5.2 —— §5.2 是"握手成功但没人应答"，症状差在日志里有
+> `WebSocket 已连接` 那一行。
 
 ### 5.1 NapCat 启动即崩（winerror 126）
 
@@ -495,6 +535,8 @@ dev profile 不开 LTO，符号少，所以 `tauri dev` 从没暴露过。
 | 命令 | 作用 |
 | --- | --- |
 | `.\scripts\dev.ps1` | 起完整应用（自动设好 Rust PATH / `CARGO_TARGET_DIR`，免踩 §5.7） |
+| `.\scripts\build.ps1` | 打 release 包，产物归拢到 `R:\QQ-Drawer\` |
+| `.\scripts\start.bat` | 日常启动：按需拉起 NapCat + 抽屉（见 §4.1） |
 | `npm run dev` | Vite 开发服务器（走 mock 后端，脱离 NapCat 调界面） |
 | `npm test` | 前端单测（vitest，127 个用例） |
 | `npm run test:watch` | 单测 watch 模式 |
@@ -526,9 +568,13 @@ qq-drawer/
 │   ├── cmd.rs                        # 暴露给前端的 IPC 命令
 │   └── lib.rs                        # 装配
 ├── tests/                            # 前端集成测试
+├── scripts/                          # 本机工具：dev.ps1 / build.ps1 / start.bat
 ├── docs/                             # 规格说明书
 └── preview/                          # 交互形态预览（静态 HTML）
 ```
+
+> `scripts/` 下的三个脚本都硬编码了本机路径（`R:\Rust\…`、`R:\NapCat`、`R:\QQ-Drawer`），
+> 换机器要改文件顶部的变量。
 
 ### 架构上不能破的四条
 
