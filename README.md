@@ -362,7 +362,13 @@ R:\QQ-Drawer\Start QQ Drawer.bat
    （工作目录 `R:\NapCat`，命令 `node.exe index.js`，等价于 `R:\NapCat\napcat.bat`）。
    NapCat 约 10~30 秒启动完；**如果 QQ 登录态过期，它那个窗口会打出二维码**，
    用手机 QQ 扫一下。
-2. 启动 `QQ-Drawer.exe`，剩下的交给它的自动重连。
+2. 用 `tasklist` 查 `QQ-Drawer.exe` 在不在，在就跳过，不在才启动它；
+   剩下的交给它的自动重连。
+
+**两步都是幂等的，连点几次没关系**——不会堆出第二个 NapCat，也不会堆出第二个抽屉。
+
+> 这个应用本身**没有单实例保护**（全局搜 `single_instance` 无结果），直接双击两次
+> `QQ-Drawer.exe` 会在托盘里堆两个图标、屏幕上叠两条折叠条。所以才要在脚本里拦一道。
 
 脚本是纯 ASCII + CRLF（cmd.exe 按 OEM 码页读 `.bat`，中文会变乱码甚至让
 `goto :label` 解析失败），路径写死在文件顶部，NapCat 或 exe 搬家了改那两行就行。

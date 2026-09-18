@@ -2,7 +2,7 @@
 setlocal
 
 rem ---------------------------------------------------------------------------
-rem  QQ Drawer - one-click launcher.
+rem  QQ Drawer - one-click launcher. Safe to double-click repeatedly.
 rem
 rem  NapCat IS the "server": it is the local OneBot 11 endpoint on
 rem  ws://127.0.0.1:3001, and it is where every QQ message comes from.
@@ -12,15 +12,21 @@ rem  Start order does NOT matter. QQ Drawer retries with backoff
 rem  (0.5s - 1s - 2s - 4s - 8s - 16s ...) until the port answers, so
 rem  launching the drawer first is harmless - it just connects late.
 rem
-rem  This file is deliberately ASCII-only: cmd.exe reads .bat in the OEM
-rem  codepage, and non-ASCII bytes here turn into mojibake that can even
-rem  break the parser on some machines.
+rem  Both steps are idempotent: NapCat is skipped when 3001 already listens,
+rem  and the drawer is skipped when QQ-Drawer.exe is already running (this
+rem  app has no single-instance guard, so a second copy would just stack
+rem  another icon in the tray instead of focusing the first one).
+rem
+rem  This file is deliberately ASCII + CRLF: cmd.exe reads .bat in the OEM
+rem  codepage, so non-ASCII bytes here turn into mojibake that can break the
+rem  parser; LF-only line endings break `goto :label`.
 rem ---------------------------------------------------------------------------
 
 set "NAPCAT_DIR=R:\NapCat"
 set "NAPCAT_EXE=%NAPCAT_DIR%\node.exe"
 set "NAPCAT_ENTRY=index.js"
 set "DRAWER_EXE=R:\QQ-Drawer\QQ-Drawer.exe"
+set "DRAWER_IMAGE=QQ-Drawer.exe"
 
 rem --- step 1: is NapCat already listening on 3001? --------------------------
 rem findstr exits 0 when it matched, 1 when it did not, 2 on error.
@@ -40,12 +46,20 @@ goto :drawer
 :napcat_up
 echo [1/2] NapCat is already listening on 3001, nothing to do.
 
-rem --- step 2: start the drawer, it connects on its own ----------------------
+rem --- step 2: is the drawer already running? --------------------------------
 
 :drawer
+tasklist /fi "IMAGENAME eq %DRAWER_IMAGE%" 2>nul | findstr /i /c:"%DRAWER_IMAGE%" >nul 2>&1
+if not errorlevel 1 goto :drawer_up
+
 if not exist "%DRAWER_EXE%" goto :no_drawer
 echo [2/2] starting QQ Drawer ...
 start "" "%DRAWER_EXE%"
+exit /b 0
+
+:drawer_up
+echo [2/2] QQ Drawer is already running, nothing to do.
+echo       It reconnects on its own, give it a few seconds.
 exit /b 0
 
 rem --- error paths -----------------------------------------------------------
