@@ -87,12 +87,84 @@ fn image_from(data: &Value) -> (Seg, Option<String>) {
     (Seg::Image { path: None, sub_type, state }, url)
 }
 
+/// 拆开 QQ 机器人 `markdown` 段的 `content`，得到「图片直链 / @ 的名字 / 剩下的可见文字」。
+///
+/// 这个段只有一个 `content` 字段，内容是普通 markdown 的混排，实测形态：
+///
+/// ```text
+/// [@FourofO4](mqqapi://markdown/mention?at_type=1&at_tinyid=734918143)
+/// ![img #1116px #3548px](https://qqbot.ugcimg.cn/1905536814/….jpg)
+/// ```
+///
+/// 图片拎出来走正常的下载落盘（`Seg::Image`），链接只保留标签文字 ——
+/// 机器人几乎只用 markdown 干这两件事。**认不出的部分原样留在文字里**，
+/// 宁可显示得糙一点，也不要凭空吞掉内容。
+fn markdown_parts(content: &str) -> (Vec<String>, Vec<String>, String) {
+    let mut images = Vec::new();
+    let mut mentions = Vec::new();
+    let mut text = String::new();
+    let mut i = 0usize;
+
+    while i < content.len() {
+        let Some(rel) = content[i..].find('[') else {
+            text.push_str(&content[i..]);
+            break;
+        };
+        let open = i + rel;
+        // `![alt](url)` 才是图片；`[label](url)` 是链接
+        let is_image = open > i && content.as_bytes()[open - 1] == b'!';
+
+        // 找 `]` 之后紧跟的 `(...)`。少任何一半都当普通字符处理，不做深究
+        let rest = &content[open + 1..];
+        let parsed = rest.find(']').and_then(|c| {
+            let after = &rest[c + 1..];
+            after.strip_prefix('(')?.find(')').map(|e| (c, e))
+        });
+        let Some((close, paren)) = parsed else {
+            // 多带一个字符，免得把位于 `[` 前面的 `!` 丢掉
+            text.push_str(&content[i..open + 1]);
+            i = open + 1;
+            continue;
+        };
+
+        // 标签之前的字面量；图片语法那个 `!` 不算内容
+        text.push_str(&content[i..if is_image { open - 1 } else { open }]);
+        let label = &rest[..close];
+        let url = &rest[close + 2..close + 2 + paren];
+
+        if is_image {
+            if url.starts_with("http") {
+                images.push(url.to_string());
+            }
+        } else if url.starts_with("mqqapi://") {
+            mentions.push(label.to_string());
+        } else {
+            text.push_str(label);
+        }
+        i = open + close + paren + 4;
+    }
+
+    (images, mentions, text)
+}
+
 /// 解析上游消息段数组。
 ///
 /// `self_id` 用来判定 @我；@ 的具体昵称留给调用方从成员表补齐
 /// （解析阶段不碰数据库，这样这段逻辑可以纯函数测试）。
 pub fn parse(raw: &[Value], self_id: i64) -> Parsed {
     let mut out = Parsed::default();
+
+    // 这条消息别处有没有等价的段。NapCat 会把纯文本的 markdown **再给一份 `text`**，
+    // 机器人 @ 人时也常常 markdown 链接和 `at` 段同时出现；不先看一眼就会渲染成两份。
+    let has_text = raw.iter().any(|it| {
+        it.get("type").and_then(|v| v.as_str()) == Some("text")
+            && it
+                .get("data")
+                .and_then(|d| d.get("text"))
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| !s.is_empty())
+    });
+    let has_at = raw.iter().any(|it| it.get("type").and_then(|v| v.as_str()) == Some("at"));
 
     for item in raw {
         let kind = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -150,6 +222,46 @@ pub fn parse(raw: &[Value], self_id: i64) -> Parsed {
                     .unwrap_or_default();
                 if !id.is_empty() {
                     out.segments.push(Seg::Reply { id });
+                }
+            }
+            "markdown" => {
+                let content = data.get("content").and_then(|v| v.as_str()).unwrap_or_default();
+                let (urls, mentions, text) = markdown_parts(content);
+                // 一个字都没拆出来（空 content、或只有一张没带直链的图）才算"看不懂"
+                let nothing = urls.is_empty() && mentions.is_empty() && text.trim().is_empty();
+
+                for u in urls {
+                    let (seg, url) = image_from(&json!({ "url": u }));
+                    if let Some(u) = url {
+                        let sub_type = match &seg {
+                            Seg::Image { sub_type, .. } => *sub_type,
+                            _ => 0,
+                        };
+                        out.images.push(ImageTask { index: out.segments.len(), url: u, sub_type });
+                    }
+                    out.segments.push(seg);
+                }
+                if !has_at {
+                    for m in mentions {
+                        out.segments.push(Seg::text(m));
+                    }
+                }
+                // 前后空白不留（`flatten` 本来也会收敛），但紧跟在 @ 后面的那个空格要保住：
+                // `[@某人](…) 在吗` 这类把 @ 和正文写在一行里的内容，丢了空格会粘成 `@某人在吗`
+                let tail = text.trim();
+                if !tail.is_empty() && !has_text {
+                    let lead = if text.starts_with(char::is_whitespace)
+                        && out.segments.last().is_some_and(|s| matches!(s, Seg::Text { .. }))
+                    {
+                        " "
+                    } else {
+                        ""
+                    };
+                    out.segments.push(Seg::text(format!("{lead}{tail}")));
+                }
+                // 内容认不出来 → 还是退回卡片占位
+                if nothing {
+                    out.segments.push(Seg::placeholder("card", "[卡片消息]"));
                 }
             }
             "face" | "mface" => out.segments.push(Seg::placeholder("face", "[表情]")),
@@ -390,6 +502,165 @@ mod tests {
             1,
         );
         assert_eq!(p.plain_text(), "在");
+    }
+
+    /* ---- markdown（QQ 机器人的富文本，实测是群里最容易被漏掉的一类） ---- */
+
+    #[test]
+    fn markdown拆解_图片艾特文字混排() {
+        let (imgs, ats, text) = markdown_parts(
+            "[@小明](mqqapi://markdown/mention?at_type=1&at_tinyid=1)\n\
+             ![img #1116px #3548px](https://qqbot.ugcimg.cn/a/b.jpg)\n收工",
+        );
+        assert_eq!(imgs, vec!["https://qqbot.ugcimg.cn/a/b.jpg"]);
+        assert_eq!(ats, vec!["@小明"]);
+        assert_eq!(text.trim(), "收工", "夹在语法之间的字面量不能丢");
+    }
+
+    #[test]
+    fn markdown拆解_语法不完整时原样保留() {
+        let (imgs, ats, text) = markdown_parts("看图 ![img](https://a/b");
+        assert!(imgs.is_empty());
+        assert!(ats.is_empty());
+        assert_eq!(text, "看图 ![img](https://a/b", "少了右括号就整段当文字，不吞字");
+    }
+
+    #[test]
+    fn 解析_markdown里的图片入队下载() {
+        let p = parse(
+            &raw(json!([{
+                "type": "markdown",
+                "data": { "content": "![img #1116px #3548px](https://qqbot.ugcimg.cn/a/b.jpg)" }
+            }])),
+            1,
+        );
+        assert_eq!(p.images.len(), 1);
+        assert_eq!(p.images[0].url, "https://qqbot.ugcimg.cn/a/b.jpg");
+        assert_eq!(p.images[0].index, 0);
+        assert!(p.has_image(), "markdown 里的图也要算进 has_image");
+        assert_eq!(p.plain_text(), "[图片]");
+    }
+
+    #[test]
+    fn 解析_markdown纯文本不重复成两句() {
+        // NapCat 对纯文本 markdown 会额外再给一份 `text` 段，直接照抄会渲染成两句
+        let p = parse(
+            &raw(json!([
+                { "type": "markdown", "data": { "content": "确认好了，回网页那边。" } },
+                { "type": "text", "data": { "text": "确认好了，回网页那边。" } }
+            ])),
+            1,
+        );
+        assert_eq!(p.segments, vec![Seg::text("确认好了，回网页那边。")]);
+    }
+
+    #[test]
+    fn 解析_markdown纯文本没有text段时降级为文本() {
+        let p = parse(&raw(json!([{ "type": "markdown", "data": { "content": "任务已完成" } }])), 1);
+        assert_eq!(p.segments, vec![Seg::text("任务已完成")]);
+    }
+
+    #[test]
+    fn 解析_markdown的艾特在已有at段时不重复() {
+        let p = parse(
+            &raw(json!([
+                {
+                    "type": "markdown",
+                    "data": {
+                        "content": "[@FourofO4](mqqapi://markdown/mention?at_type=1&at_tinyid=734918143)\n![img](https://qqbot.ugcimg.cn/a.jpg)"
+                    }
+                },
+                { "type": "at", "data": { "qq": "734918143" } }
+            ])),
+            3431439965,
+        );
+        assert_eq!(p.segments.len(), 2, "只留图片段和 at 段：{:?}", p.segments);
+        assert!(matches!(p.segments[0], Seg::Image { .. }));
+        assert!(matches!(p.segments[1], Seg::At { .. }));
+    }
+
+    #[test]
+    fn 解析_markdown的艾特没有at段时变成文本() {
+        let p = parse(
+            &raw(json!([{
+                "type": "markdown",
+                "data": { "content": "[@小明](mqqapi://markdown/mention?at_type=1&at_tinyid=1) 在吗" }
+            }])),
+            1,
+        );
+        assert_eq!(p.plain_text(), "@小明 在吗", "@ 和正文之间的空格要留住");
+    }
+
+    #[test]
+    fn 解析_markdown普通链接只留标签() {
+        let p = parse(
+            &raw(json!([{ "type": "markdown", "data": { "content": "看[这里](https://example.com/x)吧" } }])),
+            1,
+        );
+        assert_eq!(p.plain_text(), "看这里吧");
+    }
+
+    #[test]
+    fn 解析_markdown认不出来时退回卡片占位() {
+        // 空 content、以及字段整个缺失：都要有兜底文案，不能渲染成空白
+        assert_eq!(
+            parse(&raw(json!([{ "type": "markdown", "data": { "content": "" } }])), 1).plain_text(),
+            "[卡片消息]"
+        );
+        assert_eq!(
+            parse(&raw(json!([{ "type": "markdown", "data": {} }])), 1).plain_text(),
+            "[卡片消息]"
+        );
+    }
+
+    #[test]
+    fn 解析_markdown真实样例回放() {
+        // 下面四条是从本机 NapCat `get_msg` 抓回来的**原始** message 数组，一字未改。
+        // 都是群里那个 QQ 机器人（小饭卡）发的，修复前一律渲染成 `[暂不支持的消息类型]`。
+        let cases = [
+            // ① 纯图片
+            (
+                json!([{ "type": "markdown", "data": { "content": "![img #1116px #3548px](https://qqbot.ugcimg.cn/1905536814/470ec7b1c875830136c49c7c45dd33321b1a28e6/fb0eb8d520c224c9a1b14a0bcdea067a)" } }]),
+                "[图片]",
+            ),
+            // ② 纯文本，NapCat 另外补了一份 `text`，不能渲染成两句
+            (
+                json!([
+                    { "type": "markdown", "data": { "content": "确认好了，回网页那边，它会自己开始传。" } },
+                    { "type": "text", "data": { "text": "确认好了，回网页那边，它会自己开始传。" } }
+                ]),
+                "确认好了，回网页那边，它会自己开始传。",
+            ),
+            // ③ @ 在 markdown 里、同时另有 `at` 段
+            (
+                json!([
+                    { "type": "markdown", "data": { "content": "[@FourofO4](mqqapi://markdown/mention?at_type=1&at_tinyid=734918143)\n![img #1116px #3548px](https://qqbot.ugcimg.cn/1905536814/7cbbe644373c2fc145f4b2b0f3494ee4550da26d/809642dfc41a98e508f7f7b93a8d4605)" } },
+                    { "type": "at", "data": { "qq": "734918143" } }
+                ]),
+                // 段序就是上游给的顺序：markdown 在前、`at` 在后
+                "[图片]@734918143",
+            ),
+            // ④ 纯图片，另一条
+            (
+                json!([{ "type": "markdown", "data": { "content": "![img #1800px #4894px](https://qqbot.ugcimg.cn/1905536814/de2fce6321521440006dbc8444d902628f5f0398/eb546f8280bd945b7b06786cd3c106b0)" } }]),
+                "[图片]",
+            ),
+        ];
+
+        for (i, (payload, want)) in cases.iter().enumerate() {
+            let p = parse(&raw(payload.clone()), 3431439965);
+            assert_eq!(p.plain_text(), *want, "样例 {} 回放结果不对", i + 1);
+            assert!(!p.segments.is_empty());
+        }
+
+        // ①④ 各有一张图，③ 也有一张 → 三张图都要真的进下载队列
+        let imgs: Vec<String> = cases
+            .iter()
+            .flat_map(|(v, _)| parse(&raw(v.clone()), 3431439965).images)
+            .map(|t| t.url)
+            .collect();
+        assert_eq!(imgs.len(), 3, "三条图片位置都对不上：{imgs:?}");
+        assert!(imgs.iter().all(|u| u.starts_with("https://qqbot.ugcimg.cn/")));
     }
 
     #[test]

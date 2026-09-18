@@ -4,8 +4,9 @@
 
 **电脑上不登录 QQ 客户端**——消息来自本机运行的 NapCat（无头 QQ）+ OneBot 11 WebSocket，登录态留在手机 QQ 上。
 
-> **状态**：v1.0 代码已完成。前端 127 个单测全绿，`tsc --noEmit` 无错，生产构建通过；
-> Rust 侧 216 个单测全绿（`cargo test`，Windows + GNU 工具链）。第一次在本机跑 `cargo test`
+> **状态**：v1.0 代码已完成，并已在本机 **真实 QQ 登录的 NapCat** 上跑通（收消息、拉会话、
+> 图片落盘、折叠条显示）。前端 127 个单测全绿，`tsc --noEmit` 无错，生产构建通过；
+> Rust 侧 228 个单测全绿（`cargo test`，Windows + GNU 工具链）。第一次在本机跑 `cargo test`
 > 若报 `0xc0000139`，看 [§1.5](#15-cargo-test-与-windows-应用清单)。
 >
 > 实现依据：[`docs/开发规格说明书.md`](docs/开发规格说明书.md)（需求、交互、数据模型、踩坑清单全在里面）
@@ -204,13 +205,67 @@ Caused by:
 
 ## 2. 准备 NapCat（一次性，约 10 分钟）
 
-1. 获取 NapCatQQ（Windows 版），按官方文档完成首次登录（手机 QQ 扫码授权）。
-2. 打开 WebUI（默认 `http://127.0.0.1:6099`）→ **网络配置 → 新建 → WebSocket 服务器**：
-   - `host`：`127.0.0.1`（**不要**监听 `0.0.0.0`，不要映射到公网）
-   - `port`：`3001`
-   - `token`：自己设一个长字符串（**必设**，该端口默认裸奔）
-   - 打开 **"上报自身消息"**（`reportSelfMessage`）——这是收到 `message_sent.*` 事件的前提，否则你在抽屉里发出的消息拿不到真实 `message_id`。
+NapCat 是"无头 QQ"本体：它自己登录 QQ，再把标准 OneBot 11 接口开在一个本地端口上。
+抽屉只认这个端口，**不碰、不注入 QQ 客户端**。
+
+### 2.1 装与登录
+
+1. 取 NapCatQQ 的 **Windows Node 版**（`NapCat.Shell.Windows.Node.zip`），解压到任意目录（本机是 `R:\NapCat`）。
+   zip 里自带 `node.exe`，不需要另装 Node。双击 `napcat.bat` 启动。
+2. 浏览器打开 WebUI（默认 `http://127.0.0.1:6099/webui`，带 token 的完整地址启动日志里会打），
+   用**手机 QQ 扫码**完成首次登录。
 3. **保持手机 QQ 在线**。NapCat 在线时电脑端 QQ 客户端会被互踢，这正是我们要的效果。
+
+> 启动就报 `Error: The specified module could not be found …wrapper.node`（winerror 126）？
+> 不是你装错了——官方包本身缺文件，见 [§5.1](#51-napcat-启动即崩-winerror-126)。
+
+### 2.2 开一个 WebSocket 服务器
+
+WebUI → **网络配置 → 新建 → WebSocket 服务器**：
+
+| 字段 | 值 | 为什么 |
+| --- | --- | --- |
+| `host` | `127.0.0.1` | **不要**监听 `0.0.0.0`，不要映射到公网 |
+| `port` | `3001` | 与设置里的 `ws_url` 对应 |
+| `token` | 一段长随机串 | **必设**。该端口默认裸奔，而 localhost 的 WebSocket 不受同源策略保护，本机任何网页都能连上来 |
+| 上报自身消息 | 打开（`reportSelfMessage`） | 收到 `message_sent.*` 事件的前提；不开的话，你在抽屉里发出的消息拿不到真实 `message_id` |
+| 消息格式 | `array` | 抽屉按消息段数组解析 |
+
+配置按**登录成功的真实 uin** 命名落盘，即 `R:\NapCat\napcat\config\onebot11_<uin>.json`。
+
+> ⚠️ **别在登录前手写配置文件**：NapCat 会按 WebUI 里列出的"快速登录候选"之外的**真号**另建一份，
+> 你预置的那份 uin 对不上就永远不会被读取。现象很有迷惑性——端口不开，日志里连
+> `websocketServers` 相关的行都没有。正确顺序是：先扫码登录，再改配置。
+
+### 2.3 改配置不必重启（WebUI 有 REST API）
+
+`POST /api/OB11Config/SetConfig` 在后端走的是 `save() → reloadNetwork()`，会关掉已删除的适配器、
+注册并打开新增的，**立刻生效且不丢登录态**（重启则要重新扫码）。鉴权是 JWT，不是裸 token：
+
+```
+hash = SHA256(webuiToken + ".napcat")        # hex
+POST /api/auth/login  {"hash": "<hex>"}      # → data.Credential（base64 JWT）
+后续请求：Authorization: Bearer <Credential>
+```
+
+`websocketServers` 的字段（v4.18.28 实测，写错字段名会让**整份配置失效**）：
+
+```js
+{ name, enable, host, port, messagePostFormat, reportSelfMessage,
+  token, enableForcePushEvent, debug, heartInterval }
+// 默认 enable=false / host="127.0.0.1" / port=3001 / messagePostFormat="array"
+//      reportSelfMessage=false / token="" / heartInterval=30000
+```
+
+注意**没有** `reconnectInterval` / `verifyCertificate`——那些属于 `websocketClients`（反向 WS 客户端）。
+
+### 2.4 把 token 填进抽屉
+
+托盘图标右键 → 设置 → 连接 → `ws://127.0.0.1:3001` + 上面那个 token。
+
+> token 空着会连出一个很有辨识度的假象：**握手是成功的（101），但 NapCat 不回任何动作响应**，
+> 日志里 `获取登录信息失败 … 超时（8000 ms）`、`拉取会话列表失败 … 超时（20000 ms）`，
+> 几十秒后对端主动关闭。看到这三行就直接去核 token，别怀疑网络。详见 [§5.2](#52-连上了但所有请求都超时)。
 
 ## 3. 运行
 
@@ -224,7 +279,12 @@ npm run dev            # → http://localhost:5173
 npm run tauri dev
 ```
 
-首次连上后：托盘图标右键 → 设置 → 连接 → 填 `ws://127.0.0.1:3001` 与 token。连上后折叠条出现，点击展开。
+连上之后折叠条出现在屏幕右上角，点击展开。首次要填 token，见 [§2.4](#24-把-token-填进抽屉)。
+
+> **退出只有一条路**：托盘图标右键。窗口是 `skipTaskbar: true` + `closable: false`，
+> 任务栏里看不到、`Alt+Tab` 里也没有。
+> 另有两条全局快捷键：`Ctrl+Alt+Q` 展开/收起，`Ctrl+Alt+M` 静音切换
+> （`Ctrl+Alt+M` 可能被别的程序占用，日志里会打 `HotKey already registered`，属正常降级）。
 
 ## 4. 构建安装包
 
@@ -233,6 +293,101 @@ npm run tauri build -- --bundles nsis
 ```
 
 只出 NSIS 安装包，产物在 `src-tauri/target/release/bundle/nsis/`。目标机需要 WebView2 Runtime（Win10 较新版本已内置，安装包用 bootstrapper 模式兜底）。
+
+---
+
+## 5. 排障
+
+按"症状"查。这几条都是本机真实撞过的，不是想象出来的。
+
+### 5.1 NapCat 启动即崩（winerror 126）
+
+```
+Error: The specified module could not be found. …\wrapper.node
+```
+
+**是官方包自己缺文件，不是你解压坏了。** 解析 `wrapper.node` 的 PE 导入表可以看到
+33 个**静态**导入里缺 `crypto.dll` 和 `ssl.dll`（不是 delay-load，没法靠"用到才加载"绕过）。
+NapCat 的 CI 打包任务只从 QQ 安装包里抠 12 个文件，漏了这两个。
+
+补法：从 QQ 官方安装包（`QQ_9.9.31_260528_x64_01.exe`，CI 里用的同一个 sha256）里
+解出 `resources\app\crypto.dll` 与 `ssl.dll`，复制到 NapCat 目录即可。
+这个 exe 本身就是 7z SFX，用 NapCat 自带的 `7z.exe` 直接展开。
+
+> 判别手法：**先把静态导入表和延迟导入表分开**（延迟描述符 `ImgDelayDescr` 是 32 字节，
+> 不是静态的 20 字节，写错会解析出乱码把结论带偏）。`api-ms-*` / `ext-ms-*` 报 not found
+> 属正常噪声，那是 API set 虚名，由加载器解析。
+
+### 5.2 连上了，但所有请求都超时
+
+日志长这样：
+
+```
+INFO  WebSocket 已连接 url="ws://127.0.0.1:3001"
+WARN  获取登录信息失败 error=get_login_info 超时（8000 ms）     ← 精确 8 秒
+WARN  拉取会话列表失败 error=get_recent_contact 超时（20000 ms） ← 精确 20 秒
+WARN  连接中断 error=对端发来关闭帧
+```
+
+两个完全不同的原因会给出**同一种**日志，先分开：
+
+- **`url` 里没有 `?access_token=`** → 设置里 token 是空的。NapCat 让握手过（101），
+  但不认这个连接，于是不回任何动作响应，几十秒后关闭。用 §5.4 的探针带上 token 一试就能确认。
+- **`url` 里带了 token，仍然超时** → 这是代码缺陷，已在 `b57fa54` 修掉：
+  读循环启动晚于初始化请求，而响应的派发就在读循环里，于是初始化那两条请求根本没人接。
+  特征是 `self_id` 停在 0、启动时拉不到会话列表，属**静默降级**。升级到该提交之后的版本即可。
+
+### 5.3 明明配好了，端口就是不开
+
+先去 NapCat 日志里搜有没有 `WebSocket服务: 127.0.0.1:3001 … 已启动`。
+
+- **一个字都没有** → 你改的那份 `onebot11_<uin>.json` 的 uin 不是当前登录的号。
+  NapCat 按**真实 uin** 建配置，预置文件前必须先确认真实 uin（见 §2.2 的警告）。
+- **有 `已启动` 但连不上** → 看 `websocketServers` 的字段名。
+  配置有 schema 校验，字段名写错会让**整份配置失效**，且不一定会报错。
+
+### 5.4 不装任何库验一遍 OneBot
+
+想绕开抽屉、直接问 NapCat 要数据时，用裸 socket 手写 WebSocket 握手即可
+（本机脚本 `.workbuddy/tmp/wstest.py`，带 `Authorization: Bearer <token>`）：
+
+```
+3001 OPEN
+status: HTTP/1.1 101 Switching Protocols
+get_login_info → {"status":"ok","retcode":0,"data":{"user_id":…,"nickname":"…"}}
+get_status     → {"status":"ok","retcode":0,"data":{"online":true,"good":true}}
+```
+
+**握手能过 ≠ 能收数据**，所以探针一定要发一条真实的 action 并等响应——只测端口开没开会被骗。
+
+### 5.5 重启整套应用之前
+
+`vite.config.ts` 里是 `strictPort: true`，5173 被占着 `npm run dev` 会**直接失败**，
+但 Tauri 进程可能还活着、界面是断的，日志里看不出异常。所以重启前先确认三件事：
+
+1. `5173` 空着（否则先杀掉自己起的 vite）
+2. `qq-drawer.exe` 没在跑
+3. **别误杀 `napcat\node.exe`**——那是 NapCat 本体（有主进程 + worker 两个），杀掉要重新登录
+
+### 5.6 图片落盘失败（日志有 `图片落盘失败`）
+
+```
+WARN qq_drawer_lib::media: 图片落盘失败 error=落盘图片失败: …\media\5a\5aae….gif
+```
+
+**先看是不是被写保护拦了。** 如果这个进程是从受限环境（沙箱 / 自动化宿主）里起来的，
+stderr 里会有这么一段，直接点名：
+
+```
+[sandbox] 命令被沙箱拦截，以下操作被拒绝：
+  - …\AppData\Local\qq-drawer\media\d2\d28e….jpg.part (读/写 · 拒绝)
+```
+
+注意 `EBWebView` 的缓存目录也一起被拒（§1.4 讲的是同一条策略：**对工作区之外的写入要过检查**，
+且被拒是 fail-closed）。这种情况下**代码没问题**，换个普通终端启动就正常。
+特征是"偶发"：同一张图重试一次往往就成了，所以 `image_cache` 里最终仍然有记录。
+
+真在正常环境里也必现的话，再往杀软/权限上查。
 
 ---
 
@@ -319,6 +474,14 @@ qq-drawer/
 4. **Win10 没有原生圆角**，圆角只能在 CSS 层画；模糊用 `apply_blur` 而不是 `apply_acrylic`（后者在 Win10 拖动/缩放时明显掉帧）。
 5. **不嵌入壁纸层**。只有"始终置顶 / 不置顶"两档，不置顶时会被其它窗口盖住。
 6. **NapCat 在线时电脑端官方 QQ 会被互踢**（符合设计预期；手机端可同时在线）。
+7. **QQ 机器人爱用的 `markdown` 只做了有限支持**（`![alt](url)` 取图、`[文本](url)` 留标签文字）。
+   机器人还会发 `json` / `xml` 卡片，那两类仍然只显示 `[卡片消息]`，不解析小程序。
+8. **图片落盘偶发失败**：日志出现 `图片落盘失败` 而缓存目录里其实有文件，说明当次
+   `write`/`rename` 被瞬时拒绝。实测最常见的原因是**进程从受限/沙箱环境里启动**——
+   沙箱会明确拒绝 `%LOCALAPPDATA%\qq-drawer\media\**` 与 `EBWebView` 缓存的写入
+   （同一条策略，见 §1.4 与 §5.6）。换个普通终端启动即可。落盘本身没有重试，
+   被拒的那条消息会显示 `[图片加载失败]`，但同一张图往往在别的消息或下一次重试里已经缓存好了。
+9. **`Ctrl+Alt+M`（静音）可能被别的程序占用**，注册失败只打一条 WARN 就降级，不影响开关折叠条的 `Ctrl+Alt+Q`。
 
 ## 免责声明
 
