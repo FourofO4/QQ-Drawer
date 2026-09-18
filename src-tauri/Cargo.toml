@@ -21,7 +21,11 @@ opt-level = 2
 
 [lib]
 name = "qq_drawer_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# 只保留 rlib。`staticlib` / `cdylib` 是给 iOS / Android 用的，本项目只做
+# Windows 桌面端，留着反而有害：release 开了 fat LTO + opt-level="z" 之后，
+# cdylib 的自动导出符号数量会超过 PE 的 65535 个序号上限，MinGW ld 直接以
+# `error: export ordinal too large: 73741` 失败（README §5.8）。
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

@@ -34,7 +34,7 @@ if (Test-Path 'R:\Rust\cargo') {
 }
 
 # ---- The important bit: target dir must not contain spaces ----
-$env:CARGO_TARGET_DIR = 'R:\Code\qq-drawer-target'
+$env:CARGO_TARGET_DIR = Join-Path $env:TEMP 'qq-drawer-target'
 New-Item -ItemType Directory -Force -Path $env:CARGO_TARGET_DIR | Out-Null
 
 # ---- npm ----

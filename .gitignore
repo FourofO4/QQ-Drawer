@@ -3,6 +3,9 @@ node_modules/
 dist/
 src-tauri/target/
 
+# 打包好的可执行产物（安装包 / 便携 exe），不进仓库
+release/
+
 # Tauri 每次构建都会重新生成的 capability / ACL schema
 src-tauri/gen/
 

@@ -282,7 +282,7 @@ npm run dev            # → http://localhost:5173
 # R 盘 Rust 工具链 + 无空格的 target 目录
 # 本仓库路径 R:\Code\QQ Drawer 含空格，CARGO_TARGET_DIR 不设会炸（见 §5.7）
 $env:PATH = "R:\Rust\toolchain\bin;R:\Rust\mingw64\bin;" + $env:PATH
-$env:CARGO_TARGET_DIR = "R:\Code\qq-drawer-target"
+$env:CARGO_TARGET_DIR = "$env:TEMP\qq-drawer-target"
 
 npm run tauri dev
 ```
@@ -306,13 +306,44 @@ npm run tauri dev
 > 另有两条全局快捷键：`Ctrl+Alt+Q` 展开/收起，`Ctrl+Alt+M` 静音切换
 > （`Ctrl+Alt+M` 可能被别的程序占用，日志里会打 `HotKey already registered`，属正常降级）。
 
-## 4. 构建安装包
+## 4. 打包（出可双击运行的程序）
 
-```bash
+本机已经有一份打好的，直接双击就能用：
+
+```
+R:\QQ-Drawer\QQ-Drawer.exe
+```
+
+要重新打，PowerShell 里跑（`CARGO_TARGET_DIR` 的要求同 §5.7，不设会在链接期炸）：
+
+```powershell
+$env:PATH = "R:\Rust\toolchain\bin;R:\Rust\mingw64\bin;" + $env:PATH
+$env:CARGO_TARGET_DIR = "$env:TEMP\qq-drawer-target"
+
 npm run tauri build -- --bundles nsis
 ```
 
-只出 NSIS 安装包，产物在 `src-tauri/target/release/bundle/nsis/`。目标机需要 WebView2 Runtime（Win10 较新版本已内置，安装包用 bootstrapper 模式兜底）。
+或者直接用封装脚本，它跑完会把产物归拢到 `R:\QQ-Drawer\`：
+
+```powershell
+.\scripts\build.ps1
+```
+
+产物：
+
+| 文件 | 说明 |
+| --- | --- |
+| `R:\QQ-Drawer\QQ-Drawer.exe` | 便携版，双击直接跑（需要 WebView2 Runtime，Win10 较新版本已内置） |
+| `R:\QQ-Drawer\QQ-Drawer-Setup.exe` | NSIS 安装包（跑 `build.ps1` 才生成）。**当前用户**安装，开始菜单里有快捷方式 |
+
+> 想放桌面：右键 `QQ-Drawer.exe` → **发送到 → 桌面快捷方式**。不用每次开命令行。
+>
+> **装/放完之后不需要命令行。** 抽屉连的还是 `%LOCALAPPDATA%\qq-drawer` 里那份配置，
+> 所以 dev 阶段填好的 `ws_url` / token 会自动沿用。**但 NapCat 仍要在跑**——它是消息来源，
+> 可以给 `R:\NapCat\napcat.bat` 也建个开机自启的快捷方式。
+
+**release 构建很慢**（fat LTO + `opt-level="z"`，首次约 25~30 分钟，且 MinGW ld 链接是瓶颈）。
+`%TEMP%\qq-drawer-target` 里的依赖是缓存复用的，别随手删。
 
 ---
 
@@ -425,7 +456,7 @@ windres: preprocessing failed.
 修法：把 `CARGO_TARGET_DIR` 指到**不含空格**的路径再构建：
 
 ```powershell
-$env:CARGO_TARGET_DIR = "R:\Code\qq-drawer-target"   # 或 $env:TEMP\qq-drawer-target
+$env:CARGO_TARGET_DIR = "$env:TEMP\qq-drawer-target"   # 只要不含空格，放哪都行
 npm run tauri dev
 ```
 
@@ -434,6 +465,26 @@ npm run tauri dev
 
 > 只在 workspace 路径含空格时才会出现。换成 `R:\code\qq-drawer` 这种没空格的路径
 > 也可以根治，但已经装好的工程不值得为它搬家。
+
+### 5.8 release 链接失败：`error: export ordinal too large: 73741`
+
+```
+error: could not compile `qq-drawer` (lib) due to 1 previous error
+note: ld.exe: error: export ordinal too large: 73741
+      collect2.exe: error: ld returned 1 exit status
+```
+
+**这是 cdylib 的锅，不是代码问题。** `Cargo.toml` 的 `[lib] crate-type` 原本是
+`["staticlib", "cdylib", "rlib"]`（Tauri 模板给移动端留的）。Windows 上用 MinGW
+链接 cdylib 时，`ld` 默认 `--export-all-symbols`，release 开了 fat LTO +
+`opt-level="z"` 之后被导出的符号数超过 PE 的 **65535 个序号上限**，于是直接失败。
+dev profile 不开 LTO，符号少，所以 `tauri dev` 从没暴露过。
+
+修法：本项目只做 Windows 桌面端，把 `crate-type` 收成 `["rlib"]` 即可（已改）。
+`staticlib` 是 iOS 用的、`cdylib` 是 Android 用的，桌面端一个都不需要。
+
+> 如果以后真要出移动端，别把它们加回来——改成给 cdylib 单独限制导出符号
+> （`-Wl,--exclude-all-symbols` 或提供 `.def`），而不是让 ld 全量导出。
 
 ---
 
