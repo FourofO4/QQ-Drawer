@@ -365,6 +365,7 @@ button {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  flex: none;
 }
 
 .day {
@@ -580,6 +581,7 @@ button {
   font-size: var(--fs-meta);
   color: var(--t4);
   padding: 6px 0;
+  flex: none;
 }
 
 /* ---- 输入区 ---- */
