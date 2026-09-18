@@ -274,15 +274,30 @@ npm install
 
 # 只调界面：浏览器里跑，用的是内置假后端，不需要 NapCat
 npm run dev            # → http://localhost:5173
+```
 
-# 完整应用：Tauri 窗口 + Rust 后端，需要 NapCat 已就绪
+完整应用（Tauri 窗口 + Rust 后端，需要 NapCat 已就绪）要在 **PowerShell** 里跑：
+
+```powershell
+# R 盘 Rust 工具链 + 无空格的 target 目录
+# 本仓库路径 R:\Code\QQ Drawer 含空格，CARGO_TARGET_DIR 不设会炸（见 §5.7）
+$env:PATH = "R:\Rust\toolchain\bin;R:\Rust\mingw64\bin;" + $env:PATH
+$env:CARGO_TARGET_DIR = "R:\Code\qq-drawer-target"
+
 npm run tauri dev
+```
+
+懒得每次敲这几行，直接跑封装脚本（它把 `PATH` / `CARGO_HOME` / `CARGO_TARGET_DIR`
+和首次 `npm install` 都处理了）：
+
+```powershell
+.\scripts\dev.ps1
 ```
 
 **必须在普通终端启动**（PowerShell / Windows Terminal / CMD），不要从 WorkBuddy
 或其它沙箱 shell 里起。沙箱会拒绝 `%LOCALAPPDATA%\qq-drawer\media\**` 与
 `EBWebView` 临时缓存的写入，导致图片落盘偶发失败（日志里出现 `图片落盘失败`），
-详情见 [§5.6](#56-沙箱里启动导致图片落盘失败)。
+详情见 [§5.6](#56-图片落盘失败日志有-图片落盘失败)。
 
 连上之后折叠条出现在屏幕右上角，点击展开。首次要填 token，见 [§2.4](#24-把-token-填进抽屉)。
 
@@ -394,6 +409,32 @@ stderr 里会有这么一段，直接点名：
 
 真在正常环境里也必现的话，再往杀软/权限上查。
 
+### 5.7 build script 报 `gcc … No such file or directory` / `windres: preprocessing failed`
+
+```
+error: failed to run custom build command for `qq-drawer v1.0.0 (R:\Code\QQ Drawer\src-tauri)`
+--- stderr
+gcc: error: Drawer\src-tauri\target\debug\build\qq-drawer-…\out: No such file or directory
+windres: preprocessing failed.
+```
+
+**这是路径里的空格，不是缺文件。** 仓库在 `R:\Code\QQ Drawer`，`tauri-winres` 生成
+资源时把 `…\QQ Drawer\src-tauri\target\…\out` 传给 `windres` → `gcc`，参数没被引号包住，
+被按空格切成两段（报错里那个 `Drawer\src-tauri\…` 就是被切掉前半段的残骸）。
+
+修法：把 `CARGO_TARGET_DIR` 指到**不含空格**的路径再构建：
+
+```powershell
+$env:CARGO_TARGET_DIR = "R:\Code\qq-drawer-target"   # 或 $env:TEMP\qq-drawer-target
+npm run tauri dev
+```
+
+`cargo test` / `cargo clippy` 同样会被这个坑影响，所以跑 Rust 命令前也要设。
+`.\scripts\dev.ps1` 已经处理好了。
+
+> 只在 workspace 路径含空格时才会出现。换成 `R:\code\qq-drawer` 这种没空格的路径
+> 也可以根治，但已经装好的工程不值得为它搬家。
+
 ---
 
 ## 开发
@@ -402,6 +443,7 @@ stderr 里会有这么一段，直接点名：
 
 | 命令 | 作用 |
 | --- | --- |
+| `.\scripts\dev.ps1` | 起完整应用（自动设好 Rust PATH / `CARGO_TARGET_DIR`，免踩 §5.7） |
 | `npm run dev` | Vite 开发服务器（走 mock 后端，脱离 NapCat 调界面） |
 | `npm test` | 前端单测（vitest，127 个用例） |
 | `npm run test:watch` | 单测 watch 模式 |
