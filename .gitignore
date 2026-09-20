@@ -6,6 +6,15 @@ src-tauri/target/
 # 打包好的可执行产物（安装包 / 便携 exe），不进仓库
 release/
 
+# 散落在仓库根目录的构建产物副本。
+# 便携 exe / 安装包只应存在于 R:\QQ-Drawer\（scripts\build.ps1 的输出目录），
+# 仓库只放源码。曾经有过一份 QQ-Drawer.exe（6.5 MB）被提交进历史，
+# 已于 2026-09-20 用 git filter-branch 从整条历史中摘除。
+/QQ-Drawer.exe
+/QQ-Drawer-Setup.exe
+/WebView2Loader.dll
+*.pdb
+
 # Tauri 每次构建都会重新生成的 capability / ACL schema
 src-tauri/gen/
 

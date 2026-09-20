@@ -383,6 +383,24 @@ R:\QQ-Drawer\Start QQ Drawer.bat
 > **配置不用重填。** 抽屉连的还是 `%LOCALAPPDATA%\qq-drawer` 里那份，dev 阶段
 > 填好的 `ws_url` / token 会自动沿用。**换机器才需要重填**，见 [§2.4](#24-把-token-填进抽屉)。
 
+### 4.2 仓库里只放源码，不放二进制
+
+上面这两个 exe 只存在于本机 `R:\QQ-Drawer\`，**不进版本库**：
+
+- 它们是构建产物，`scripts\build.ps1` 随时能重新产出，进 git 历史没有意义；
+- 便携版 6.5 MB、NSIS 安装包更大，进了历史就是每次 `git clone` 都得拖着走。
+
+`.gitignore` 已经把该拦的都拦了：`release/`、`dist/`、`src-tauri/target/`，以及根目录
+下散落的 `/QQ-Drawer.exe`、`/QQ-Drawer-Setup.exe`、`/WebView2Loader.dll`、`*.pdb`。
+**产物一律归拢到 `R:\QQ-Drawer\`，别在仓库根目录留副本**——留了也提交不上去，
+只会在别处多一份容易过期的旧文件。
+
+> 历史里曾经进过一份 `QQ-Drawer.exe`（提交"打包成可执行文件"，6.5 MB）。
+> 2026-09-20 用 `git filter-branch --index-filter` 把它从整条历史里摘掉了，
+> `.git` 从 4.3 MB 降回 441 KB，那个提交本身因为变空也被 `--prune-empty` 丢弃。
+> 注意这类操作**改写的是历史**：远端必须强推（`git push --force-with-lease`），
+> 别处已经克隆过的副本要删掉重新 clone，否则会一直指着已失效的旧提交。
+
 ---
 
 ## 5. 排障
