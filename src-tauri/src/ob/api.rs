@@ -31,6 +31,37 @@ use tokio::sync::{mpsc, oneshot};
 pub const DEFAULT_TIMEOUT_MS: u64 = 8_000;
 /// 历史分页 / 成员列表 / 图片直链这类可能涉及磁盘与外网的 action。
 pub const HEAVY_TIMEOUT_MS: u64 = 20_000;
+/// 发消息的超时，比默认宽得多。
+///
+/// 带图片的消息要先被 NapCat 上传到腾讯的图床，8 秒经常不够；实测超时后
+/// 上游其实还在跑，最终仍会把消息发出去。所以这里的超时**不能当失败处理**
+/// （见 `cmd::send_message` 与 `TimeoutError`）。
+pub const SEND_TIMEOUT_MS: u64 = 30_000;
+
+/// 「超时」——注意它不是「失败」，而是**结果未知**。
+///
+/// 单独做成一个类型，是为了让调用方能把两者区别对待：发消息超时后上游很可能
+/// 依然把它发出去了（随后会回一条 `message_sent`），这时标成"发送失败"会
+/// 同时产生一个错误提示和一条重复消息。
+#[derive(Debug)]
+pub struct TimeoutError {
+    pub action: String,
+    pub timeout_ms: u64,
+}
+
+impl std::fmt::Display for TimeoutError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} 超时（{} ms）", self.action, self.timeout_ms)
+    }
+}
+
+impl std::error::Error for TimeoutError {}
+
+/// 这个错误是不是"超时"。`call_with_timeout` 统一用 `TimeoutError`，
+/// 所以只需要一次 downcast。
+pub fn is_timeout(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<TimeoutError>().is_some()
+}
 
 /* ------------------------------ 纯函数：帧与响应 ------------------------------ */
 
@@ -237,7 +268,10 @@ impl ActionBus {
             }
             Err(_) => {
                 self.inner.pending.lock().remove(&echo);
-                anyhow::bail!("{action} 超时（{timeout_ms} ms）");
+                return Err(anyhow::Error::new(TimeoutError {
+                    action: action.to_string(),
+                    timeout_ms,
+                }));
             }
         };
 
@@ -378,12 +412,24 @@ impl ActionBus {
     /* --- 发送 --- */
 
     /// 消息段数组由 `ob::segments::build_outgoing` 产出。
+    ///
+    /// 用 `SEND_TIMEOUT_MS` 而不是默认的 8 秒：带图片的消息要先上传，8 秒经常不够。
     pub async fn send_group_msg(&self, group_id: i64, message: Value) -> Result<Value> {
-        self.call("send_group_msg", json!({ "group_id": group_id, "message": message })).await
+        self.call_with_timeout(
+            "send_group_msg",
+            json!({ "group_id": group_id, "message": message }),
+            SEND_TIMEOUT_MS,
+        )
+        .await
     }
 
     pub async fn send_private_msg(&self, user_id: i64, message: Value) -> Result<Value> {
-        self.call("send_private_msg", json!({ "user_id": user_id, "message": message })).await
+        self.call_with_timeout(
+            "send_private_msg",
+            json!({ "user_id": user_id, "message": message }),
+            SEND_TIMEOUT_MS,
+        )
+        .await
     }
 
     /// ⚠️ **撤回**自己发出的消息。会让消息在对方那边也消失，
@@ -534,9 +580,37 @@ mod tests {
         let err = bus
             .call_with_timeout("get_status", json!({}), 30)
             .await
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("超时"), "{err}");
+            .unwrap_err();
+        assert!(err.to_string().contains("超时"), "{err}");
+        // 超时必须能被单独认出来：调用方要把它当"结果未知"而不是"失败"
+        assert!(is_timeout(&err), "超时错误必须可 downcast");
+        assert_eq!(err.downcast_ref::<TimeoutError>().unwrap().timeout_ms, 30);
+    }
+
+    #[tokio::test]
+    async fn 其它错误不会被误判成超时() {
+        let (bus, mut rx) = ActionBus::channel();
+        let handle = tokio::spawn({
+            let bus = bus.clone();
+            async move { bus.call("delete_msg", json!({ "message_id": "1" })).await }
+        });
+        let frame = rx.recv().await.unwrap();
+        let echo = frame["echo"].as_str().unwrap().to_string();
+        bus.resolve(ActionResponse {
+            echo: Some(echo),
+            ok: false,
+            error: Some("消息不存在".into()),
+            data: Value::Null,
+        });
+        let err = handle.await.unwrap().unwrap_err();
+        assert!(!is_timeout(&err), "上游明确报错就是失败，不能当超时放过");
+    }
+
+    #[tokio::test]
+    async fn 发消息用更宽的超时() {
+        // 图要先上传，8 秒经常不够；这里把常量本身钉住，防止被顺手改回默认值
+        assert!(SEND_TIMEOUT_MS > DEFAULT_TIMEOUT_MS);
+        assert_eq!(SEND_TIMEOUT_MS, 30_000);
     }
 
     #[tokio::test]

@@ -178,6 +178,26 @@ pub async fn handle(app: &AppHandle, state: &Arc<AppState>, v: &Value) {
     }
 }
 
+/// 这条刚到的消息，是不是在收我们某条**在途的乐观条目**？是的话返回那个临时 id。
+///
+/// 只有自己发的才可能对上：别人发的消息不可能对应我们本地那条乐观条目。
+/// 这一道 gate 是必要的，因为下游 `take_pending` 的匹配条件里**没有** `is_self`
+/// 之外的身份线索（OneBot 的回执事件不带 `echo`），全靠"内容 + 时间窗"，所以越早
+/// 把不可能的情形挡掉越好。
+///
+/// 接在 `handle_message`（实时事件）与 `ingest_history`（历史拉取）两处：
+/// 前者是回执正常到达的路径，后者是"回执漏了、但翻历史时又撞见这条"的兜底。
+pub(crate) fn reconcile_echo(
+    conn: &rusqlite::Connection,
+    ev: &MessageEvent,
+    text: &str,
+) -> anyhow::Result<Option<String>> {
+    if !ev.is_self {
+        return Ok(None);
+    }
+    message_store::take_pending(conn, ev.peer, text, ev.ts, message_store::ECHO_WINDOW_MS)
+}
+
 fn handle_message(app: &AppHandle, state: &Arc<AppState>, v: &Value) {
     let self_id = state.self_id();
     let Some(ev) = parse_message(v, self_id) else {
@@ -239,12 +259,15 @@ fn handle_message(app: &AppHandle, state: &Arc<AppState>, v: &Value) {
         send_state: send_state::CONFIRMED,
     };
 
-    let inserted = match state.db.tx(|c| {
+    let (inserted, reconciled) = match state.db.tx(|c| {
+        // 自己发的消息回执：先把对应的乐观条目收掉，否则同一条消息会同时以
+        // 「本地临时 id」和「上游真实 id」两行存在，界面上显示两遍 —— 见 `take_pending`。
+        let reconciled = reconcile_echo(c, &ev, &preview)?;
         let fresh = message_store::upsert(c, &new_msg)?;
         conv_store::touch_last(c, peer, ev.ts, &preview, sender_name.as_deref(), inc_unread, parsed.is_at_me)?;
-        Ok(fresh)
+        Ok((fresh, reconciled))
     }) {
-        Ok(fresh) => fresh,
+        Ok(pair) => pair,
         Err(e) => {
             tracing::warn!(error = %e, "消息入库失败");
             return;
@@ -260,6 +283,13 @@ fn handle_message(app: &AppHandle, state: &Arc<AppState>, v: &Value) {
     //
     // 新消息走 `msg_added`（带会话快照，前端顺势更新未读与预览，不用回拉整个列表）；
     // 已存在的消息被改写（图片路径回填、正文更新）走 `msg_updated`（裸 DTO）。
+    //
+    // 对账收掉的那条乐观条目要先通知前端删掉，再推真实条目：顺序反过来的话，
+    // 列表会有一瞬间同时挂着两条。
+    if let Some(temp_id) = reconciled {
+        tracing::debug!(temp_id, real_id = %ev.message_id, "回执到达，收掉对应的乐观条目");
+        emit(app, events::MSG_REMOVED, temp_id);
+    }
     let snapshot = state.db.with(|c| conv_store::get(c, peer)).ok().flatten();
     match state.db.with(|c| message_store::get(c, &ev.message_id)) {
         Ok(Some(dto)) => {
@@ -547,8 +577,18 @@ pub fn ingest_history(app: &AppHandle, state: &Arc<AppState>, self_id: i64, item
             send_state: send_state::CONFIRMED,
         };
 
-        match state.db.tx(|c| message_store::upsert(c, &new_msg)) {
-            Ok(fresh) => {
+        // 历史拉取同样可能撞上在途的乐观条目（比如刚发完就翻这一页），
+        // 不接对账的话这条真实消息会与乐观条目并存、显示两遍。
+        let outcome = state.db.tx(|c| {
+            let reconciled = reconcile_echo(c, &ev, &parsed.plain_text())?;
+            let fresh = message_store::upsert(c, &new_msg)?;
+            Ok((fresh, reconciled))
+        });
+        match outcome {
+            Ok((fresh, reconciled)) => {
+                if let Some(temp_id) = reconciled {
+                    emit(app, events::MSG_REMOVED, temp_id);
+                }
                 if fresh {
                     inserted += 1;
                 }
@@ -895,6 +935,92 @@ mod tests {
         assert!(intent.flash);
         assert_eq!(intent.mark, notify::mark::TAB, "在标签栏但非当前标签 → 留标签痕迹");
         assert!(intent.claim_bar);
+
+        Ok(())
+    }
+
+    /* ---------- 回执对账：接缝在 event ↔ store::message ---------- */
+
+    /// 造一条上游回来的「自己发的」消息事件。`time` 是秒级，`parse_message` 会补成毫秒。
+    fn self_echo(message_id: &str, text: &str, time_sec: i64) -> MessageEvent {
+        let v = json!({
+            "post_type": "message_sent",
+            "message_type": "group",
+            "sub_type": "normal",
+            "message_id": message_id,
+            "group_id": 30001,
+            "user_id": SELF,
+            "time": time_sec,
+            "self_id": SELF,
+            "message": [{ "type": "text", "data": { "text": text } }],
+            "sender": { "user_id": SELF, "nickname": "我" }
+        });
+        parse_message(&v, SELF).expect("自己发的回执应该能解析")
+    }
+
+    fn optimistic(db: &crate::store::Db, id: &str, text: &str, ts: i64) {
+        let m = message_store::NewMessage {
+            message_id: id.into(),
+            peer: Peer::group(30001),
+            ts,
+            sender_id: SELF,
+            sender_name: Some("我".into()),
+            is_self: true,
+            segments: vec![Seg::text(text)],
+            reply_to: None,
+            is_at_me: false,
+            send_state: crate::model::send_state::LOCAL,
+        };
+        db.tx(|c| message_store::upsert(c, &m)).unwrap();
+    }
+
+    /// 回执到达 → 收掉对应的乐观条目（否则同一条消息界面上显示两遍）
+    #[test]
+    fn 对账_回执到达时收掉乐观条目() -> anyhow::Result<()> {
+        use crate::store::Db;
+
+        let db = Db::open_memory()?;
+        db.tx(|c| conv_store::ensure(c, Peer::group(30001), "大前端交流群", None))?;
+        optimistic(&db, "local-1-1", "图片收一下", 1_700_000_000_000);
+
+        let ev = self_echo("real-1", "图片收一下", 1_700_000_000);
+        let taken = db.tx(|c| reconcile_echo(c, &ev, &ev.parsed.plain_text()))?;
+        assert_eq!(taken.as_deref(), Some("local-1-1"));
+
+        let left = db.with(|c| message_store::list_page(c, Peer::group(30001), None, 30))?;
+        assert!(left.is_empty(), "乐观条目必须已经被收走");
+
+        Ok(())
+    }
+
+    /// 别人发的消息不能碰我们的乐观条目
+    #[test]
+    fn 对账_别人发的消息不碰乐观条目() -> anyhow::Result<()> {
+        use crate::store::Db;
+
+        let db = Db::open_memory()?;
+        db.tx(|c| conv_store::ensure(c, Peer::group(30001), "大前端交流群", None))?;
+        optimistic(&db, "local-2-1", "在吗", 1_700_000_000_000);
+
+        // 同群、同一句话、同一时刻，但发信人是别人
+        let ev = parse_message(&group_event(), SELF).unwrap();
+        let taken = db.tx(|c| reconcile_echo(c, &ev, "在吗"))?;
+        assert_eq!(taken, None, "别人发的消息不该动我们的乐观条目");
+
+        Ok(())
+    }
+
+    /// 没有在途条目时是安全的空操作（例如发送很快、真实 id 早已换回来了）
+    #[test]
+    fn 对账_没有在途条目时是空操作() -> anyhow::Result<()> {
+        use crate::store::Db;
+
+        let db = Db::open_memory()?;
+        db.tx(|c| conv_store::ensure(c, Peer::group(30001), "大前端交流群", None))?;
+
+        let ev = self_echo("real-2", "随便一句", 1_700_000_000);
+        let taken = db.tx(|c| reconcile_echo(c, &ev, &ev.parsed.plain_text()))?;
+        assert_eq!(taken, None);
 
         Ok(())
     }

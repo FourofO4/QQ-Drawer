@@ -168,6 +168,70 @@ pub fn set_image_state(conn: &Connection, message_id: &str, state: i32) -> Resul
     Ok(())
 }
 
+/// 本地乐观条目的 id 前缀（`cmd::local_message_id` 产出的是 `local-<毫秒>-<序号>`）。
+pub const LOCAL_ID_PREFIX: &str = "local-";
+
+/// 回执对账的时间窗（毫秒）。
+///
+/// 拿"本地乐观条目的 `ts`"（发送那一刻的本机时间）去比"回执消息的 `ts`"（上游的时间），
+/// 两个时钟有偏差、且带图的消息还要先上传，所以窗口不能太紧。最坏情况是
+/// `SEND_TIMEOUT_MS`(30s) + `ECHO_GRACE_MS`(60s) 才等到回执，取 3 分钟留够余量，
+/// 同时又不至于把几分钟后一条内容碰巧相同的真·新消息误收掉。
+pub const ECHO_WINDOW_MS: i64 = 3 * 60_000;
+
+/// 收到自己发的消息时，把对应的乐观条目收掉。返回被收掉的本地 id。
+///
+/// **为什么必须有这个对账**：发送超时并不意味着失败 —— 带图片的消息要先上传，
+/// 上游往往还在跑，最后仍然发了出去，并回一条 `message_sent`。如果没有对账，
+/// 界面上会同时留下「发送失败」的乐观条目和真实条目：同一条消息显示两遍，
+/// 还多一个吓人的报错。
+///
+/// **匹配只能靠"内容 + 时间窗"**：OneBot 的 `message_sent` 事件里没有任何能对上
+/// 我们 `echo` 的字段（`echo` 只出现在 action 响应里，事件里没有）。所以：
+/// 同一会话、`is_self`、仍是"在途"（`LOCAL`/`SENDING`）、单行化文本相同、
+/// 且时间戳落在 `window_ms` 之内，取**最旧**的一条 —— 回执是按发送顺序回来的。
+///
+/// 刻意**不做"退化成只按会话 + 时间窗匹配"的兜底**：那会在用户从手机 QQ 发消息时
+/// 误吃掉一条真的还在途的本地条目，把用户自己发的东西弄丢。宁可留下一条重复，
+/// 也不要弄丢一条真实发送。
+pub fn take_pending(
+    conn: &Connection,
+    peer: Peer,
+    text: &str,
+    ts: i64,
+    window_ms: i64,
+) -> Result<Option<String>> {
+    let found: Option<String> = conn
+        .query_row(
+            "SELECT message_id FROM message
+              WHERE peer_type = ?1 AND peer_id = ?2
+                AND is_self = 1
+                AND message_id LIKE ?3
+                AND send_state IN (?4, ?5)
+                AND text = ?6
+                AND ABS(ts - ?7) <= ?8
+              ORDER BY ts ASC, created_at ASC
+              LIMIT 1",
+            params![
+                peer.peer_type,
+                peer.peer_id,
+                format!("{LOCAL_ID_PREFIX}%"),
+                crate::model::send_state::LOCAL,
+                crate::model::send_state::SENDING,
+                text,
+                ts,
+                window_ms
+            ],
+            |r| r.get(0),
+        )
+        .optional()?;
+
+    if let Some(id) = &found {
+        conn.execute("DELETE FROM message WHERE message_id = ?1", params![id])?;
+    }
+    Ok(found)
+}
+
 /// 图片下载完成后把路径补回消息段（§4.8 关键算法 #6）。
 ///
 /// 图片是"收到即入队下载"，所以消息先入库、路径后到；这里按段下标精确回填，
@@ -521,6 +585,132 @@ mod tests {
 
     fn setup(db: &Db) {
         db.with(|c| conversation::ensure(c, peer(), "大前端交流群", None)).unwrap();
+    }
+
+    /// 造一条"我发出的、还在途"的乐观条目
+    fn pending(db: &Db, id: &str, text: &str, ts: i64, state: i32) {
+        let mut m = new_msg(id, ts);
+        m.is_self = true;
+        m.sender_name = Some("我".into());
+        m.segments = vec![Seg::text(text)];
+        m.send_state = state;
+        db.tx(|c| upsert(c, &m)).unwrap();
+    }
+
+    const WINDOW: i64 = 5 * 60 * 1000;
+
+    #[test]
+    fn 对账_回执到达时收掉在途的乐观条目() {
+        let db = db();
+        setup(&db);
+        pending(&db, "local-1-1", "你好", 1000, crate::model::send_state::LOCAL);
+
+        let taken = db
+            .tx(|c| take_pending(c, peer(), "你好", 1500, WINDOW))
+            .unwrap();
+        assert_eq!(taken.as_deref(), Some("local-1-1"));
+        // 乐观条目必须真的从库里消失，否则界面会同时显示两条
+        assert_eq!(db.with(|c| count(c, peer())).unwrap(), 0);
+    }
+
+    #[test]
+    fn 对账_sending状态也算在途() {
+        let db = db();
+        setup(&db);
+        pending(&db, "local-2-1", "重发中", 1000, crate::model::send_state::SENDING);
+        let taken = db
+            .tx(|c| take_pending(c, peer(), "重发中", 1000, WINDOW))
+            .unwrap();
+        assert_eq!(taken.as_deref(), Some("local-2-1"));
+    }
+
+    #[test]
+    fn 对账_已确认或已失败的不动() {
+        let db = db();
+        setup(&db);
+        // 已确认的（正常发送路径已经把它换成真实 id 了）
+        let mut ok = new_msg("real-1", 1000);
+        ok.is_self = true;
+        ok.send_state = crate::model::send_state::CONFIRMED;
+        db.tx(|c| upsert(c, &ok)).unwrap();
+        // 已标记失败的：用户可能正在点重试，不能被回执顺手吃掉
+        let mut failed = new_msg("local-3-1", 1000);
+        failed.is_self = true;
+        failed.send_state = crate::model::send_state::FAILED;
+        db.tx(|c| upsert(c, &failed)).unwrap();
+
+        let taken = db
+            .tx(|c| take_pending(c, peer(), "你好", 1000, WINDOW))
+            .unwrap();
+        assert_eq!(taken, None);
+        assert_eq!(db.with(|c| count(c, peer())).unwrap(), 2, "两条都该留着");
+    }
+
+    #[test]
+    fn 对账_只收自己发的且只认本地前缀() {
+        let db = db();
+        setup(&db);
+        // 别人发的、内容一样：不能被收掉
+        db.tx(|c| upsert(c, &new_msg("other-1", 1000))).unwrap();
+        // 自己发的，但 id 不是本地前缀：那是真消息，不是乐观条目
+        let mut real = new_msg("real-2", 1000);
+        real.is_self = true;
+        real.send_state = crate::model::send_state::LOCAL;
+        db.tx(|c| upsert(c, &real)).unwrap();
+
+        let taken = db
+            .tx(|c| take_pending(c, peer(), "你好", 1000, WINDOW))
+            .unwrap();
+        assert_eq!(taken, None);
+        assert_eq!(db.with(|c| count(c, peer())).unwrap(), 2);
+    }
+
+    #[test]
+    fn 对账_内容不同不匹配() {
+        let db = db();
+        setup(&db);
+        pending(&db, "local-4-1", "说过的话", 1000, crate::model::send_state::LOCAL);
+        let taken = db
+            .tx(|c| take_pending(c, peer(), "另一句", 1000, WINDOW))
+            .unwrap();
+        assert_eq!(taken, None, "内容对不上就不该动它");
+    }
+
+    #[test]
+    fn 对账_超出时间窗不匹配() {
+        let db = db();
+        setup(&db);
+        pending(&db, "local-5-1", "你好", 1_000_000, crate::model::send_state::LOCAL);
+        let taken = db
+            .tx(|c| take_pending(c, peer(), "你好", 1_000_000 + WINDOW + 1, WINDOW))
+            .unwrap();
+        assert_eq!(taken, None, "太久的在途条目不该被这条回执吃掉");
+    }
+
+    #[test]
+    fn 对账_内容相同的连发按最旧的先收() {
+        let db = db();
+        setup(&db);
+        // 同一句话连发两次，两条都在途
+        pending(&db, "local-6-1", "在吗", 1000, crate::model::send_state::LOCAL);
+        pending(&db, "local-6-2", "在吗", 1200, crate::model::send_state::LOCAL);
+
+        let first = db.tx(|c| take_pending(c, peer(), "在吗", 1000, WINDOW)).unwrap();
+        let second = db.tx(|c| take_pending(c, peer(), "在吗", 1200, WINDOW)).unwrap();
+        assert_eq!(first.as_deref(), Some("local-6-1"), "回执按发送顺序来，先收最旧的");
+        assert_eq!(second.as_deref(), Some("local-6-2"));
+        assert_eq!(db.with(|c| count(c, peer())).unwrap(), 0);
+    }
+
+    #[test]
+    fn 对账_别的会话不串门() {
+        let db = db();
+        setup(&db);
+        pending(&db, "local-7-1", "你好", 1000, crate::model::send_state::LOCAL);
+        let taken = db
+            .tx(|c| take_pending(c, Peer::group(99999), "你好", 1000, WINDOW))
+            .unwrap();
+        assert_eq!(taken, None, "只在同一个会话里对账");
     }
 
     #[test]

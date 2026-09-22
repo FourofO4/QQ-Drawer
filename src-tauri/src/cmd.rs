@@ -229,9 +229,11 @@ pub async fn load_messages(
 
 /// 发送消息（§4.7）。
 ///
-/// 顺序是刻意的：**先落本地乐观条目 → 再发上游 → 成功后把临时条目换成真实 id**。
+/// 顺序是刻意的：**先落本地乐观条目 → 再交给后台任务发上游 → 成功后把临时条目换成真实 id**。
 /// 反过来（等上游回包再落库）会让"发送中"有一段时间是空白的，
 /// 用户会以为按钮没反应而连点。
+///
+/// 注意**这里不等上游**：见下面第 2 步的注释。
 #[tauri::command]
 pub async fn send_message(
     app: AppHandle,
@@ -244,7 +246,10 @@ pub async fn send_message(
     let peer = Peer { peer_type, peer_id };
     segments::validate_outgoing(&parts, peer.is_group())?;
 
-    let bus = state.bus.read().clone().ok_or("还没有连接上 NapCat")?;
+    // 没连上就别收下这条消息：否则会留下一条永远发不出去的乐观条目
+    if state.bus.read().is_none() {
+        return Err("还没有连接上 NapCat".into());
+    }
     let self_id = state.self_id();
     let temp_id = local_message_id();
 
@@ -275,8 +280,52 @@ pub async fn send_message(
         .map_err(err)?;
     emit_message(&app, &state, &temp_id, true);
 
-    // 2) 发上游
-    let message = segments::build_outgoing(&parts);
+    // 2) 发上游：**命令不等结果**。
+    //
+    //    乐观条目已经落库并推给前端了，用户此刻已经看见自己发的内容 —— 所以"什么时候拿到
+    //    上游回执"跟界面无关。而在这里 await 的代价很大：
+    //      · 带图片的消息要先上传，超时按 `SEND_TIMEOUT_MS` 算是 30 秒，输入框会被 busy 卡住；
+    //      · 更要命的是"超时"在旧实现里被当成"失败"，而上游其实还在跑，最后照样发了出去
+    //        —— 于是报错、消息却出现了，还多一条重复。这正是要修的 bug。
+    //    所以交给后台任务，命令立刻返回临时 id。
+    tauri::async_runtime::spawn(finish_send(
+        app.clone(),
+        state.clone(),
+        peer,
+        temp_id.clone(),
+        local,
+        segments::build_outgoing(&parts),
+    ));
+
+    Ok(SendAck { message_id: temp_id })
+}
+
+/// 超时之后还等多久的回执，才退回"发送失败"。
+///
+/// 超时只说明我们没等到 action 响应，上游可能仍在发送 —— 这段时间就是留给
+/// 那条 `message_sent` 回执的。等到了就无事发生，等不到才让用户看到失败（可重试）。
+const ECHO_GRACE_MS: u64 = 60_000;
+
+/// 把一条已落库的乐观消息真正交给上游，并按结果收敛它的状态。
+///
+/// 三种结果必须分开处理，这是"发图偶发报错但其实发出去了"的修复核心：
+///  · 成功 → 换成上游的真实 id；
+///  · **超时 → 不当失败**，保持"在途"，等回执来对账（`message_store::take_pending`），
+///    过了 [`ECHO_GRACE_MS`] 还没等到才标失败；
+///  · 其它错误 → 上游明确拒绝了这次发送，直接标失败。
+async fn finish_send(
+    app: AppHandle,
+    state: Arc<AppState>,
+    peer: Peer,
+    temp_id: String,
+    optimistic: message_store::NewMessage,
+    message: Value,
+) {
+    let Some(bus) = state.bus.read().clone() else {
+        mark_send_failed(&app, &state, &temp_id, "连接已断开");
+        return;
+    };
+
     let sent = if peer.is_group() {
         bus.send_group_msg(peer.peer_id, message).await
     } else {
@@ -292,37 +341,100 @@ pub async fn send_message(
                 data,
             })
             .unwrap_or_else(|| temp_id.clone());
-
-            // 3) 把临时条目换成真实 id。
-            //    先落真实条目再删临时条目：中间态里两条都在，比"两条都没有"好得多。
-            let real = message_store::NewMessage {
-                message_id: real_id.clone(),
-                send_state: send_state::CONFIRMED,
-                ..local.clone()
-            };
-            if let Err(e) = state.db.tx(|c| {
-                message_store::upsert(c, &real)?;
-                message_store::delete(c, &temp_id)
-            }) {
-                tracing::warn!(error = %e, "替换乐观条目失败");
-            }
-            emit(&app, events::MSG_REMOVED, temp_id.clone());
-            emit_message(&app, &state, &real_id, false);
-
-            Ok(SendAck { message_id: real_id })
+            replace_local(&app, &state, &temp_id, &real_id, optimistic);
         }
+
+        Err(e) if ob::api::is_timeout(&e) => {
+            tracing::warn!(
+                message_id = %temp_id,
+                timeout_ms = ob::api::SEND_TIMEOUT_MS,
+                "发送超时：不当失败处理，转入等待回执（上游可能仍在发送）"
+            );
+            let app2 = app.clone();
+            let state2 = state.clone();
+            let tid = temp_id;
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(ECHO_GRACE_MS)).await;
+                if is_still_pending(&state2, &tid) {
+                    tracing::warn!(message_id = %tid, "等到回执超时，标记为发送失败");
+                    mark_send_failed(&app2, &state2, &tid, "上游未在预期时间内确认");
+                }
+            });
+        }
+
         Err(e) => {
-            // 失败要让用户看得见、并且能重试 —— 直接把条目标成失败态
-            if let Err(e2) = state
-                .db
-                .tx(|c| message_store::set_send_state(c, &temp_id, send_state::FAILED))
-            {
-                tracing::warn!(error = %e2, "标记发送失败状态失败");
-            }
-            emit_message(&app, &state, &temp_id, false);
-            Err(format!("发送失败：{e}"))
+            tracing::warn!(message_id = %temp_id, error = %e, "上游拒绝了这次发送");
+            mark_send_failed(&app, &state, &temp_id, &e.to_string());
         }
     }
+}
+
+/// 乐观条目还在不在、且仍是"在途"。给超时后的宽限期用。
+fn is_still_pending(state: &Arc<AppState>, message_id: &str) -> bool {
+    state
+        .db
+        .with(|c| message_store::get(c, message_id))
+        .ok()
+        .flatten()
+        .map(|m| m.send_state == send_state::LOCAL || m.send_state == send_state::SENDING)
+        .unwrap_or(false)
+}
+
+/// 把乐观条目换成上游的真实 id。
+///
+/// **幂等**：`message_sent` 回执可能已经抢先做了对账（`take_pending` 把本地条目收掉了），
+/// 那种情况下这里什么都不用做 —— 真实条目已经在库里了。
+fn replace_local(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+    temp_id: &str,
+    real_id: &str,
+    optimistic: message_store::NewMessage,
+) {
+    let gone = state
+        .db
+        .with(|c| message_store::get(c, temp_id))
+        .ok()
+        .flatten()
+        .is_none();
+    if gone {
+        tracing::debug!(temp_id, real_id, "本地条目已被回执对账收走，跳过替换");
+        return;
+    }
+
+    // 先落真实条目再删临时条目：中间态里两条都在，比"两条都没有"好得多。
+    let real = message_store::NewMessage {
+        message_id: real_id.to_string(),
+        send_state: send_state::CONFIRMED,
+        ..optimistic
+    };
+    if let Err(e) = state.db.tx(|c| {
+        message_store::upsert(c, &real)?;
+        if real_id != temp_id {
+            message_store::delete(c, temp_id)?;
+        }
+        Ok(())
+    }) {
+        tracing::warn!(error = %e, "替换乐观条目失败");
+    }
+    emit(app, events::MSG_REMOVED, temp_id.to_string());
+    emit_message(app, state, real_id, false);
+}
+
+/// 把乐观条目标成失败态并推给前端（前端据此显示「发送失败 · 点击重试」）。
+fn mark_send_failed(app: &AppHandle, state: &Arc<AppState>, message_id: &str, why: &str) {
+    if !is_still_pending(state, message_id) {
+        // 已经不在途了（成功换了 id、或已被回执收走）—— 别把一条好消息标成失败
+        tracing::debug!(message_id, why, "条目已不在途，跳过失败标记");
+        return;
+    }
+    if let Err(e) = state
+        .db
+        .tx(|c| message_store::set_send_state(c, message_id, send_state::FAILED))
+    {
+        tracing::warn!(error = %e, "标记发送失败状态失败");
+    }
+    emit_message(app, state, message_id, false);
 }
 
 /// 重发一条失败的本地消息（FR-24）。
@@ -342,7 +454,9 @@ pub async fn retry_send(
     if !msg.is_self {
         return Err("只能重发自己发出的消息".into());
     }
-    let bus = state.bus.read().clone().ok_or("还没有连接上 NapCat")?;
+    if state.bus.read().is_none() {
+        return Err("还没有连接上 NapCat".into());
+    }
 
     let parts = tokens_of(&msg);
     if parts.is_empty() {
@@ -359,60 +473,30 @@ pub async fn retry_send(
     }
     emit_message(&app, &state, &message_id, false);
 
-    let message = segments::build_outgoing(&parts);
-    let sent = if peer.is_group() {
-        bus.send_group_msg(peer.peer_id, message).await
-    } else {
-        bus.send_private_msg(peer.peer_id, message).await
+    // 与 `send_message` 同一条路径：不在命令里等上游，交给后台任务收敛状态。
+    // 重发用的"乐观条目"就是原来那条（id 不变，只是要被换成上游真实 id）。
+    let optimistic = message_store::NewMessage {
+        message_id: message_id.clone(),
+        peer,
+        ts: msg.ts,
+        sender_id: msg.sender_id,
+        sender_name: msg.sender_name.clone(),
+        is_self: true,
+        segments: msg.segments.clone(),
+        reply_to: msg.reply_to.clone(),
+        is_at_me: false,
+        send_state: send_state::SENDING,
     };
+    tauri::async_runtime::spawn(finish_send(
+        app.clone(),
+        state.clone(),
+        peer,
+        message_id.clone(),
+        optimistic,
+        segments::build_outgoing(&parts),
+    ));
 
-    match sent {
-        Ok(data) => {
-            let real_id = ob::api::sent_message_id(&ob::api::ActionResponse {
-                echo: None,
-                ok: true,
-                error: None,
-                data,
-            })
-            .unwrap_or_else(|| message_id.clone());
-
-            let real = message_store::NewMessage {
-                message_id: real_id.clone(),
-                peer,
-                ts: msg.ts,
-                sender_id: msg.sender_id,
-                sender_name: msg.sender_name.clone(),
-                is_self: true,
-                segments: msg.segments.clone(),
-                reply_to: msg.reply_to.clone(),
-                is_at_me: false,
-                send_state: send_state::CONFIRMED,
-            };
-            if let Err(e) = state.db.tx(|c| {
-                message_store::upsert(c, &real)?;
-                if real_id != message_id {
-                    message_store::delete(c, &message_id)
-                } else {
-                    Ok(())
-                }
-            }) {
-                tracing::warn!(error = %e, "写入重发结果失败");
-            }
-            emit(&app, events::MSG_REMOVED, message_id.clone());
-            emit_message(&app, &state, &real_id, false);
-            Ok(SendAck { message_id: real_id })
-        }
-        Err(e) => {
-            if let Err(e2) = state
-                .db
-                .tx(|c| message_store::set_send_state(c, &message_id, send_state::FAILED))
-            {
-                tracing::warn!(error = %e2, "标记发送失败状态失败");
-            }
-            emit_message(&app, &state, &message_id, false);
-            Err(format!("重发失败：{e}"))
-        }
-    }
+    Ok(SendAck { message_id })
 }
 
 /* ------------------------------ 已读 ------------------------------ */
