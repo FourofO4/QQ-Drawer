@@ -196,12 +196,18 @@ async fn session(app: &AppHandle, state: &Arc<AppState>) -> Result<()> {
     // 反而正常（那时读循环才刚起来）。所以这里必须先 spawn，最后再 await 它的结束原因。
     let reader = tokio::spawn(read_loop(app.clone(), state.clone(), bus.clone(), read));
 
-    // 1) 取 self_id —— @我判定、"自己发的消息"判定都靠它，所以是连接后的第一件事
+    // 1) 取 self_id —— @我判定、"自己发的消息"判定都靠它，所以是连接后的第一件事。
+    //    顺带在这里做账号归属检查：换了号就把上个账号的会话/消息整体清掉（`account` 模块）。
     match bus.get_login_info().await {
         Ok(data) => {
             let self_id = crate::ob::model::as_i64(&data, "user_id").unwrap_or(0);
-            state.self_id.store(self_id, Ordering::Relaxed);
             let nick = crate::ob::model::as_str(&data, "nickname").unwrap_or_default();
+            // apply_login 内部负责落库 self_id；即使这个号没变，也要写一次，
+            // 否则老库（从没记过 self_id）永远判不出下一次切换。
+            let switched = crate::account::apply_login(app, state, self_id).is_some();
+            if switched {
+                tracing::info!(self_id, "账号已切换，随后的 resync 会用新账号重新填充会话");
+            }
             tracing::info!(self_id, nickname = %nick, "登录信息已获取");
         }
         Err(e) => {

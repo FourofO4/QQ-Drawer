@@ -40,6 +40,16 @@ export async function initEvents(): Promise<() => void> {
       S.setHistoryLoading(false);
     }),
 
+    /**
+     * 换了 QQ 账号：Rust 已经把上个账号的会话/消息/图片清掉了，
+     * 前端必须把消息缓存也丢掉，否则"新账号不在那个群里、旧会话却还在"。
+     * 随后的 `conversations` 快照会用新账号的种子把界面填回来。
+     */
+    ipc.onAccountChanged((selfId) => {
+      S.setSelfId(selfId);
+      S.resetForAccount();
+    }),
+
     // 失焦收起：Rust 先发事件让 UI 淡出，再改窗口尺寸（§4.3）
     ipc.onAutoCollapse(() => {
       if (!S.state.locked) requestCollapse();

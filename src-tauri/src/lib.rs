@@ -17,6 +17,7 @@
 //!  · 日志晚一点初始化没关系（前面几步不打日志），但**必须**在设置读出来之后，
 //!    否则 `log_level` 设置形同虚设。
 
+mod account;
 mod appstate;
 mod cmd;
 mod hotkey;

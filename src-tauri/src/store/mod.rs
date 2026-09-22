@@ -6,6 +6,7 @@
 //! 连接用 `parking_lot::Mutex` 而不是 `std::sync::Mutex`：这里不存在跨 await 持锁的写法，
 //! 也不需要处理中毒状态，出错的路径全都返回 `Result` 自己兜。
 
+pub mod account;
 pub mod conversation;
 pub mod image;
 pub mod member;

@@ -61,6 +61,7 @@ export const EV = {
   msgRemoved: 'msg_removed',
   notify: 'notify',
   historyPage: 'history_page',
+  accountChanged: 'account_changed',
   autoCollapse: 'auto_collapse',
   toggle: 'toggle_panel',
   openSheet: 'open_sheet',
@@ -273,6 +274,15 @@ export const onMessageRemoved = (h: (messageId: string) => void) =>
   on<string>(EV.msgRemoved, h);
 export const onNotify = (h: (i: NotifyIntent) => void) => on(EV.notify, h);
 export const onHistoryPage = (h: (p: HistoryPage) => void) => on(EV.historyPage, h);
+/**
+ * 登录的 QQ 号与上次不同：Rust 已经清空本地库，前端必须**丢掉全部消息缓存**。
+ * 载荷是新的 self_id。
+ *
+ * 为什么不能只靠 `conversations` 快照：前端消息按 peerKey 存，两个账号在同一个群里时
+ * peerKey 完全相同，只清会话列表的话旧消息会冒充成新账号的消息显示出来。
+ */
+export const onAccountChanged = (h: (selfId: number) => void) =>
+  on<number>(EV.accountChanged, h);
 export const onAutoCollapse = (h: () => void) => on<void>(EV.autoCollapse, () => h());
 export const onTogglePanel = (h: () => void) => on<void>(EV.toggle, () => h());
 /** 托盘菜单请求打开浮层：载荷是 `'settings' | 'cache'` */

@@ -5,8 +5,8 @@
 **电脑上不登录 QQ 客户端**——消息来自本机运行的 NapCat（无头 QQ）+ OneBot 11 WebSocket，登录态留在手机 QQ 上。
 
 > **状态**：v1.0 代码已完成，并已在本机 **真实 QQ 登录的 NapCat** 上跑通（收消息、拉会话、
-> 图片落盘、折叠条显示）。前端 127 个单测全绿，`tsc --noEmit` 无错，生产构建通过；
-> Rust 侧 228 个单测全绿（`cargo test`，Windows + GNU 工具链）。第一次在本机跑 `cargo test`
+> 图片落盘、折叠条显示）。前端 131 个单测全绿，`tsc --noEmit` 无错，生产构建通过；
+> Rust 侧 238 个单测全绿（`cargo test`，Windows + GNU 工具链）。第一次在本机跑 `cargo test`
 > 若报 `0xc0000139`，看 [§1.5](#15-cargo-test-与-windows-应用清单)。
 >
 > 实现依据：[`docs/开发规格说明书.md`](docs/开发规格说明书.md)（需求、交互、数据模型、踩坑清单全在里面）
@@ -215,6 +215,11 @@ NapCat 是"无头 QQ"本体：它自己登录 QQ，再把标准 OneBot 11 接口
 2. 浏览器打开 WebUI（默认 `http://127.0.0.1:6099/webui`，带 token 的完整地址启动日志里会打），
    用**手机 QQ 扫码**完成首次登录。
 3. **保持手机 QQ 在线**。NapCat 在线时电脑端 QQ 客户端会被互踢，这正是我们要的效果。
+
+> **换 QQ 号登录会清空本地记录。** 抽屉是**单账号**的：`conversation` / `message` 这些表
+> 不带账号列，所以一旦发现这次登录的号跟上次不一样，就把上一个号的会话、消息、图片整体
+> 清掉，再按新号重新拉取。**你的设置不受影响**——连接地址、token、窗口位置、折叠条宽度
+> 都不用重填。细节见文末「已知限制」第 9 条。
 
 > 启动就报 `Error: The specified module could not be found …wrapper.node`（winerror 126）？
 > 不是你装错了——官方包本身缺文件，见 [§5.1](#51-napcat-启动即崩winerror-126)。
@@ -562,7 +567,7 @@ dev profile 不开 LTO，符号少，所以 `tauri dev` 从没暴露过。
 | `.\scripts\build.ps1` | 打 release 包，产物归拢到 `R:\QQ-Drawer\` |
 | `.\scripts\start.bat` | 日常启动：按需拉起 NapCat + 抽屉（见 §4.1） |
 | `npm run dev` | Vite 开发服务器（走 mock 后端，脱离 NapCat 调界面） |
-| `npm test` | 前端单测（vitest，127 个用例） |
+| `npm test` | 前端单测（vitest，131 个用例） |
 | `npm run test:watch` | 单测 watch 模式 |
 | `npm run build` | `tsc --noEmit` + 生产构建 |
 | `npm run tauri dev` | 起完整应用（Rust + WebView2 窗口） |
@@ -586,6 +591,8 @@ qq-drawer/
 ├── src-tauri/src/                    # Rust 后端
 │   ├── ob/                           # OneBot 协议隔离层（事件名/字段/消息段只出现在这里）
 │   ├── store/                        # SQLite 访问层（唯一有写权限的地方）
+│   │   └── account.rs                # "哪些表属于账号"的清单 + 换账号时的整体清空
+│   ├── account.rs                    # 登录后判账号归属，换号则清库并通知前端（见「已知限制」10）
 │   ├── sched/notify.rs               # 提醒优先级（纯函数）
 │   ├── media.rs                      # 图片落盘 / 去重 / LRU / media:// 协议
 │   ├── window.rs tray.rs hotkey.rs   # 无边框窗口几何、托盘、全局快捷键
@@ -650,6 +657,15 @@ qq-drawer/
    （同一条策略，见 §1.4 与 §5.6）。换个普通终端启动即可。落盘本身没有重试，
    被拒的那条消息会显示 `[图片加载失败]`，但同一张图往往在别的消息或下一次重试里已经缓存好了。
 9. **`Ctrl+Alt+M`（静音）可能被别的程序占用**，注册失败只打一条 WARN 就降级，不影响开关折叠条的 `Ctrl+Alt+Q`。
+10. **抽屉是单账号的，换 QQ 号登录会清空上一个号的本地记录**。`conversation` / `message` /
+    `member_cache` / `mute` / `tombstone` 都不带账号列，所以判定"这次登录的号与上次不同"时，
+    这些表整体清空（图片一起清），再按新号重新 seed —— 这就是"换号后上个号的会话不会留在
+    界面上"的实现方式。
+    判定依据是 meta 里的 `self_id`：**同号重连不清**；拿不到 `self_id` 时**什么都不做**
+    （宁可这轮不判，也不能因为一个 0 把好数据清了）；老库从没记过 `self_id` 而有数据时，
+    因为归属无从考证，会当作上个号的残留清一次（只在升级后的第一次登录发生）。
+    **`settings` 一律不动** —— 连接地址、token、窗口位置、折叠条宽度都不受换号影响。
+    对应实现：`src-tauri/src/account.rs` + `src-tauri/src/store/account.rs`。
 
 ## 免责声明
 

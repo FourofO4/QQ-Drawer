@@ -22,6 +22,12 @@ pub mod events {
     pub const MSG_REMOVED: &str = "msg_removed";
     pub const NOTIFY: &str = "notify";
     pub const HISTORY_PAGE: &str = "history_page";
+    /// 登录的 QQ 号与上次不同：本地已清空，前端必须**立刻丢掉全部消息缓存**。
+    /// 载荷是新的 self_id（i64）。
+    ///
+    /// 光发 `CONVERSATIONS` 不够——前端 `state.messages` 是按 peerKey 存的，
+    /// 新旧账号若在同一个群里，peerKey 相同，旧消息会冒充成新账号的消息显示出来。
+    pub const ACCOUNT_CHANGED: &str = "account_changed";
     pub const AUTO_COLLAPSE: &str = "auto_collapse";
     pub const TOGGLE_PANEL: &str = "toggle_panel";
     /// 请求前端打开某个浮层（设置页 / 缓存管理页）。托盘菜单用。

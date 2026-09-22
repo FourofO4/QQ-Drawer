@@ -60,6 +60,11 @@ beforeEach(() => {
   // store 是模块级单例，测试之间必须把消息清干净，否则会串味
   S.dropMessages({ peer_type: 1, peer_id: 30001 });
   S.dropMessages({ peer_type: 0, peer_id: 20001 });
+  // 「换账号后要重挑默认会话」是一次性标记，喂一份非空快照把它消费掉，
+  // 否则会漏到下一个用例里去。
+  S.setConversations([convOf({ peer_id: 99999, tab_order: 0 })]);
+  S.setConversations([]);
+  S.selectByKey(null);
 });
 
 /** 把某个会话设为当前，这样 currentRows / currentMessages 才有内容 */
@@ -114,6 +119,7 @@ describe('IPC 契约', () => {
       'msg_removed',
       'notify',
       'history_page',
+      'account_changed',
       'auto_collapse',
       'toggle_panel',
       'open_sheet',
@@ -367,5 +373,64 @@ describe('切换会话即视为已读 FR-23', () => {
     S.selectByKey('1:30001');
     S.setConversations([convOf({ peer_id: 30002, tab_order: 0 })]);
     expect(S.state.current).toBeNull();
+  });
+});
+
+/* ------------------------------------------------------------------ */
+
+describe('换 QQ 账号后不留上个账号的数据', () => {
+  it('resetForAccount 把会话、消息、选中态一起清掉', () => {
+    focus(convOf({ peer_id: 30001, tab_order: 0 }));
+    S.addMessage(msgOf({ message_id: 'm1', ts: 1 }));
+    expect(S.state.messages['1:30001']).toHaveLength(1);
+    expect(S.state.current).toBe('1:30001');
+
+    S.resetForAccount();
+
+    expect(S.state.conversations).toEqual([]);
+    expect(S.state.messages).toEqual({});
+    expect(S.state.atTop).toEqual({});
+    expect(S.state.current).toBeNull();
+    expect(S.currentRows()).toEqual([]);
+  });
+
+  it('换账号后第一份非空快照会自动选中第一个', () => {
+    S.resetForAccount();
+    // Rust 清完库会先推一份**空**快照，它不该把"重挑默认会话"这件事消费掉
+    S.setConversations([]);
+    expect(S.state.current).toBeNull();
+
+    S.setConversations([
+      convOf({ peer_id: 30001, tab_order: 0 }),
+      convOf({ peer_id: 30002, tab_order: 1 }),
+    ]);
+    expect(S.state.current).toBe('1:30001');
+  });
+
+  it('account_changed 到达时清空缓存并更新 selfId', async () => {
+    await initEvents();
+    focus(convOf({ peer_id: 30001, tab_order: 0 }));
+    S.addMessage(msgOf({ message_id: 'm1', ts: 1 }));
+
+    const fire = listeners.get('account_changed');
+    expect(fire).toBeDefined();
+    fire?.({ payload: 2002 });
+
+    expect(S.state.selfId).toBe(2002);
+    expect(S.state.messages).toEqual({});
+    expect(S.state.conversations).toEqual([]);
+  });
+
+  it('旧账号在同一个群里留下的消息不会冒充新账号的消息', () => {
+    // 两个账号都在群 30001 里：peerKey 相同，只清会话列表是不够的
+    focus(convOf({ peer_id: 30001, tab_order: 0 }));
+    S.addMessage(msgOf({ message_id: 'old-account', ts: 1, text: '上个账号看到的' }));
+    expect(S.currentMessages()).toHaveLength(1);
+
+    S.resetForAccount();
+    S.setConversations([convOf({ peer_id: 30001, tab_order: 0 })]);
+
+    expect(S.state.current).toBe('1:30001');
+    expect(S.currentMessages()).toHaveLength(0);
   });
 });

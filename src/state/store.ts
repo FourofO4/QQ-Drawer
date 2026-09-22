@@ -170,6 +170,12 @@ export function setSelfId(id: number | null): void {
 }
 
 /**
+ * 「换账号后需要重挑一个默认会话」的一次性标记。
+ * 放在模块级而不是 store 里：它是流程状态，不是要渲染的视图状态。
+ */
+let autoSelectPending = false;
+
+/**
  * 整表替换会话快照。数据量是几十条，全量刷新比做增量同步便宜得多，也不易出错。
  * 注意：新会话追加到标签末尾这条规则由 Rust 决定，前端不插手。
  */
@@ -178,6 +184,36 @@ export function setConversations(list: ConversationDTO[]): void {
   if (state.current !== null && !list.some((c) => peerKey(c) === state.current)) {
     setState('current', null);
   }
+  // 换账号后需要重挑一个默认会话，等新账号的种子到齐再挑（见 resetForAccount）。
+  // 只在这一个场景下自动选中：平时"选中项消失就保持不选"是有意义的语义
+  // —— `applyNotify` 靠 `current` 判断"是不是正在看"，乱选会吃掉新消息的闪动提醒。
+  if (autoSelectPending && list.length > 0) {
+    autoSelectPending = false;
+    const first = tabs()[0] ?? list[0];
+    if (first !== undefined) selectConversation(first);
+  }
+}
+
+/**
+ * 换了 QQ 账号（Rust 已清空本地库，事件载荷是新 self_id）。
+ *
+ * 必须**连消息缓存一起丢**：消息按 peerKey 存，两个账号都在同一个群里时 peerKey
+ * 完全相同，只清会话列表的话，旧账号的消息会冒充成新账号的消息显示出来。
+ */
+export function resetForAccount(): void {
+  autoSelectPending = true;
+  setState({
+    conversations: [],
+    messages: {},
+    atTop: {},
+    current: null,
+    flashKey: null,
+    quote: null,
+    members: [],
+    historyLoading: false,
+    viewer: null,
+    overflowOpen: false,
+  });
 }
 
 export function upsertConversation(conv: ConversationDTO): void {
