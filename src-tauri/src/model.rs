@@ -274,6 +274,18 @@ pub struct HistoryPagePayload {
     pub at_top: bool,
 }
 
+/// `window_state` 的负载：窗口形态的**唯一权威**。
+///
+/// 前端 store 里那份 `expanded` 只是这一份的镜像，用来决定渲染折叠条还是面板；
+/// 带上实际尺寸是为了排障 —— 出问题时一眼能看出"Rust 认为的形态"和"窗口真实大小"
+/// 是否一致（两者不一致就是几何漂了，而不是状态错了）。
+#[derive(Clone, Debug, Serialize)]
+pub struct WindowStateDto {
+    pub expanded: bool,
+    pub width: u32,
+    pub height: u32,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ToastPayload {
     pub text: String,

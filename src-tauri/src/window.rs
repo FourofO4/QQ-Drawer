@@ -25,6 +25,14 @@ pub const SNAP_THRESHOLD: i32 = 24;
 /// 结果面板先自己收起来了。
 pub const SUPPRESS_MS: i64 = 300;
 
+/// 拖动窗口时抑制"失焦收起"的时长。
+///
+/// 比 [`SUPPRESS_MS`] 长得多，因为要覆盖的不只是"按下的那一瞬"：
+/// 系统模态移动循环起来时窗口会走一遍焦点变化，而一次拖动能持续好几秒。
+/// 折叠态下 `Moved` 会持续续期（见 `on_window_event`），所以这个值只需要
+/// 足够撑到第一次移动事件到达。
+pub const DRAG_SUPPRESS_MS: i64 = 1_500;
+
 /// 工作区（显示器可用区域）。
 ///
 /// 说明：这里用**整个显示器范围**而不是 `work_area()`。
@@ -240,8 +248,47 @@ pub fn set_expanded(app: &AppHandle, state: &Arc<AppState>, expanded: bool) -> a
         persist_anchor(state, anchor.0, anchor.1);
     }
 
-    tracing::debug!(expanded, x = pos.0, y = pos.1, "窗口状态已切换");
+    // 几何已落地，把权威形态广播出去。前端只跟随这个事件，
+    // 于是"两份 expanded 错开"最多存在一个事件周期，不会再卡住（见 events::WINDOW_STATE）。
+    broadcast_window_state(app, state);
+
+    // 提到 info 级：形态切换是排障第一现场，debug 级在默认日志里看不到，
+    // 之前"拖动后窗口形体错乱"就是因为没有痕迹而只能靠猜。
+    tracing::info!(
+        expanded,
+        x = pos.0,
+        y = pos.1,
+        w = size.0,
+        h = size.1,
+        "窗口状态已切换"
+    );
     Ok(())
+}
+
+/// 把当前形态播给前端。**幂等**，可以在任何觉得"状态可能漂了"的地方调用。
+pub fn broadcast_window_state(app: &AppHandle, state: &Arc<AppState>) {
+    let expanded = state.expanded.load(Ordering::Relaxed);
+    let (width, height) = state.size_for(expanded);
+    crate::appstate::emit(
+        app,
+        crate::appstate::events::WINDOW_STATE,
+        crate::model::WindowStateDto { expanded, width, height },
+    );
+}
+
+/// 拖动窗口：**先抑制自动收起，再交给系统拖动**。
+///
+/// 为什么必须裹这一层：拖动会让窗口失焦（系统模态移动循环开始时焦点会走一遍），
+/// 而未锁定时"失焦 = 自动收起"。于是用户在拖动过程中窗口被从展开态缩成折叠态，
+/// 系统移动循环随后又把窗口矩形还原成拖动开始时的大小 ——
+/// 结果就是"窗口是展开尺寸，里面却只画着折叠条"，正是要修的那个 bug。
+pub fn begin_drag(app: &AppHandle, state: &Arc<AppState>) -> anyhow::Result<()> {
+    suppress_auto_collapse(state, DRAG_SUPPRESS_MS);
+    let win = app
+        .get_webview_window("main")
+        .ok_or_else(|| anyhow::anyhow!("找不到主窗口"))?;
+    win.start_dragging()
+        .map_err(|e| anyhow::anyhow!("启动窗口拖动失败：{e}"))
 }
 
 /// 抑制「失焦收起」一段时间。托盘菜单交互前调用。
@@ -276,11 +323,19 @@ pub fn on_window_event(state: &Arc<AppState>, app: &AppHandle, event: &tauri::Wi
         }
 
         tauri::WindowEvent::Moved(pos) => {
-            // 只在折叠态记录锚点：展开态的位置可能是被 `anchor` 平移过的，
-            // 拿它当锚点会让折叠条一步步往左上爬。
+            // 展开态的位置可能是被 `anchor` 平移过的，拿它当锚点会让折叠条一步步往左上爬。
+            // 所以下面的处理只在折叠态做。
             if state.expanded.load(Ordering::Relaxed) {
                 return;
             }
+
+            // 折叠态下窗口在动 = 用户正拖着折叠条：**移动本身就在抑制自动收起**。
+            //
+            // 只在折叠态刷新，是因为展开态的 Moved 里混着我们自己 `set_position` 造成的
+            // 程序化移动（展开时的越界平移），那时候续期会把该收起的时机一直往后推。
+            // 折叠态没有这个问题：收起态下自动收起本来就是空操作（它要求当前是展开态）。
+            suppress_auto_collapse(state, SUPPRESS_MS);
+
             let win = app.get_webview_window("main");
             let Some(win) = win else { return };
             let work = work_area_of(&win);
@@ -406,5 +461,41 @@ mod tests {
         // 收起时用锚点（而不是展开后的位置）→ 回到原点
         let back = clamp_to_work(origin, (264, 40), &w);
         assert_eq!(back, origin);
+    }
+
+    /* ---------- 拖动期间抑制自动收起（bug：拖动后窗口形体错乱） ---------- */
+
+    fn state() -> std::sync::Arc<crate::appstate::AppState> {
+        use crate::model::Settings;
+        let db = crate::store::Db::open_memory().unwrap();
+        crate::appstate::AppState::new(db, Settings::default(), std::path::PathBuf::from("."))
+    }
+
+    #[test]
+    fn 抑制期内的自动收起会被挡下() {
+        let st = state();
+        assert!(!collapse_suppressed(&st), "初始不该被抑制");
+        suppress_auto_collapse(&st, DRAG_SUPPRESS_MS);
+        assert!(collapse_suppressed(&st));
+    }
+
+    #[test]
+    fn 抑制是取最大值而不是覆盖() {
+        let st = state();
+        suppress_auto_collapse(&st, DRAG_SUPPRESS_MS);
+        // 后到的短抑制不能把已经排好的长抑制缩短 ——
+        // 否则"拖动中顺手点了一下托盘"会让窗口在拖动中途被收起来。
+        suppress_auto_collapse(&st, 1);
+        assert!(collapse_suppressed(&st));
+    }
+
+    #[test]
+    fn 拖动抑制必须明显长于托盘抑制() {
+        // 托盘抑制只要挡住"点图标那一下"，拖动抑制要覆盖整段"按下的瞬间 + 焦点变化"。
+        // 两者搞反了，拖动开始时窗口会被自己收起来。
+        assert!(
+            DRAG_SUPPRESS_MS > SUPPRESS_MS * 3,
+            "拖动抑制 {DRAG_SUPPRESS_MS}ms 太短，挡不住拖动起始时的失焦"
+        );
     }
 }

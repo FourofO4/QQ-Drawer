@@ -30,6 +30,14 @@ pub mod events {
     pub const ACCOUNT_CHANGED: &str = "account_changed";
     pub const AUTO_COLLAPSE: &str = "auto_collapse";
     pub const TOGGLE_PANEL: &str = "toggle_panel";
+    /// 窗口几何**真的落地之后**的权威形态。载荷是 `WindowStateDto { expanded, width, height }`。
+    ///
+    /// 为什么必须有它：`expanded` 原本有两份互不相干的副本 —— Rust 的
+    /// `AppState.expanded`（决定窗口多大）和前端 store 里的（决定渲染折叠条还是面板）。
+    /// 两边一旦因为任何原因错开（命令异常、与拖动抢时序……），界面就会永久卡在
+    /// "窗口是展开尺寸、里面却只画了折叠条"的状态，必须再点一下才恢复。
+    /// 现在 Rust 每次切换成功后主动广播，前端**只跟随**，错配活不过一个事件周期。
+    pub const WINDOW_STATE: &str = "window_state";
     /// 请求前端打开某个浮层（设置页 / 缓存管理页）。托盘菜单用。
     /// 载荷是 `"settings" | "cache"` 字符串。
     pub const OPEN_SHEET: &str = "open_sheet";

@@ -10,7 +10,7 @@
 
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { getCurrentWindow } from '@tauri-apps/api/window';
+
 import type {
   CacheOverviewDTO,
   ConnectionState,
@@ -49,6 +49,8 @@ export const CMD = {
   setViewing: 'set_viewing',
   expand: 'expand_window',
   collapse: 'collapse_window',
+  beginDrag: 'begin_drag',
+  windowState: 'window_state',
   exit: 'exit_app',
 } as const;
 
@@ -64,6 +66,7 @@ export const EV = {
   accountChanged: 'account_changed',
   autoCollapse: 'auto_collapse',
   toggle: 'toggle_panel',
+  windowState: 'window_state',
   openSheet: 'open_sheet',
   toast: 'toast',
 } as const;
@@ -254,11 +257,19 @@ export const exitApp = () => call<void>(CMD.exit);
 export const setViewing = (peerType: PeerType | null, peerId: number | null) =>
   call<void>(CMD.setViewing, { peerType, peerId });
 
-/** 交给系统做拖动——只有位移超过 3px 才调用，避免"一拖就展开"（踩坑 #7） */
-export const startDragging = async (): Promise<void> => {
-  if (!isTauri()) return;
-  await getCurrentWindow().startDragging();
-};
+/**
+ * 拖动窗口。
+ *
+ * **不要改成直接 `getCurrentWindow().startDragging()`**：那会绕过 Rust 侧
+ * "拖动期间抑制自动收起"的那一步。未锁定状态下拖动会让窗口失焦，而失焦 = 自动收起，
+ * 于是拖到一半窗口被缩成折叠态、系统的移动循环又把窗口矩形还原 ——
+ * 结果是"窗口是展开尺寸、里面只画着折叠条"。
+ */
+export const beginDrag = () => call<void>(CMD.beginDrag);
+
+/** 问一次窗口形态的权威值（bootstrap 自检用） */
+export const windowState = () =>
+  call<{ expanded: boolean; width: number; height: number }>(CMD.windowState);
 
 
 /* ------------------------------ 事件订阅 ------------------------------ */
@@ -285,6 +296,14 @@ export const onAccountChanged = (h: (selfId: number) => void) =>
   on<number>(EV.accountChanged, h);
 export const onAutoCollapse = (h: () => void) => on<void>(EV.autoCollapse, () => h());
 export const onTogglePanel = (h: () => void) => on<void>(EV.toggle, () => h());
+/**
+ * 窗口形态的权威值：Rust 每次 `expand` / `collapse` **真的改完窗口之后**广播。
+ *
+ * 前端 store 里的 `expanded` 只是这份的镜像。跟随它，是为了让
+ * "Rust 认为展开、界面却画着折叠条"这种错配活不过一个事件周期。
+ */
+export const onWindowState = (h: (s: { expanded: boolean }) => void) =>
+  on<{ expanded: boolean }>(EV.windowState, h);
 /** 托盘菜单请求打开浮层：载荷是 `'settings' | 'cache'` */
 export const onOpenSheet = (h: (sheet: string) => void) => on<string>(EV.openSheet, h);
 export const onToast = (h: (t: ToastPayload) => void) => on(EV.toast, h);

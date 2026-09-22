@@ -926,6 +926,44 @@ pub fn collapse_window(app: AppHandle, state: State<'_, Arc<AppState>>) -> CmdRe
     window::set_expanded(&app, state.inner(), false).map_err(err)
 }
 
+/// 拖动窗口。**不要直接调前端的 `startDragging()`** —— 那会绕过"拖动期间抑制自动收起"，
+/// 未锁定时拖动会把自己收起来（见 `window::begin_drag`）。
+#[tauri::command]
+pub fn begin_drag(app: AppHandle, state: State<'_, Arc<AppState>>) -> CmdResult<()> {
+    window::begin_drag(&app, state.inner()).map_err(err)
+}
+
+/// 问一次窗口形态的权威值。
+///
+/// 前端在 bootstrap 时对齐一次，避免"窗口已经是展开尺寸、界面却还画着折叠条"
+/// 这种状态在没有切换动作的情况下一直挂着。
+#[tauri::command]
+pub fn window_state(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> CmdResult<crate::model::WindowStateDto> {
+    let expanded = state.inner().expanded.load(std::sync::atomic::Ordering::Relaxed);
+    let (width, height) = state.inner().size_for(expanded);
+    let actual = app
+        .get_webview_window("main")
+        .and_then(|w| w.outer_size().map_err(|e| e.to_string()).ok())
+        .map(|s| (s.width, s.height))
+        .unwrap_or((width, height));
+    tracing::info!(
+        expanded,
+        expect_w = width,
+        expect_h = height,
+        actual_w = actual.0,
+        actual_h = actual.1,
+        "窗口形态自检"
+    );
+    Ok(crate::model::WindowStateDto {
+        expanded,
+        width: actual.0,
+        height: actual.1,
+    })
+}
+
 /// 前端同步「我正在看哪个会话」。
 ///
 /// 提醒决策（该不该闪、要不要即时已读）完全依赖它 ——

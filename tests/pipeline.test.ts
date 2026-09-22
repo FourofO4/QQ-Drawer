@@ -31,9 +31,9 @@ vi.mock('@tauri-apps/api/event', () => ({
   },
 }));
 
-vi.mock('@tauri-apps/api/window', () => ({
-  getCurrentWindow: () => ({ startDragging: vi.fn(async () => undefined) }),
-}));
+// 注意：**这里刻意不再打桩 `@tauri-apps/api/window`**。
+// 拖动窗口现在必须走 Rust 侧的 `begin_drag`（它要先抑制"失焦收起"），
+// 谁要是图省事直接 import 窗口 API 自己 startDragging，应该在这里就炸出来。
 
 // vitest 里 import.meta.env.DEV 也是 true，会让 ipc.ts 去挂浏览器假后端。
 // 我们本来就打桩了 invoke，所以直接把假后端也打桩掉。
@@ -45,7 +45,7 @@ vi.mock('../src/dev/mock', () => ({
 
 const S = await import('../src/state/store');
 const ipc = await import('../src/state/ipc');
-const { initEvents, openPanel } = await import('../src/state/events');
+const { initEvents, openPanel, resyncWindowState } = await import('../src/state/events');
 const { pickBarConversation, composeBar } = await import('../src/core/preview');
 const { summarize } = await import('../src/core/segments');
 
@@ -122,6 +122,7 @@ describe('IPC 契约', () => {
       'account_changed',
       'auto_collapse',
       'toggle_panel',
+      'window_state',
       'open_sheet',
       'toast',
     ]) {
@@ -158,6 +159,60 @@ describe('IPC 契约', () => {
     expect(order).toContain('load_messages');
     expect(order).toContain('mark_read');
     expect(order.indexOf('expand_window')).toBeLessThan(order.indexOf('load_messages'));
+  });
+
+  /**
+   * 窗口形态的单一数据源。
+   *
+   * 回归的 bug：非锁定状态下拖动窗口会变成"展开尺寸的窗口 + 里面只画着折叠条"，
+   * 必须再点一下才恢复。根因是 `expanded` 有两份副本 ——
+   * Rust 的 `AppState.expanded`（决定窗口多大）与前端 store 里的（决定画折叠条还是面板），
+   * 拖动过程中被自动收起抢了时序之后就永久错开。
+   */
+  it('拖动走 begin_drag，让 Rust 先抑制"失焦收起"', async () => {
+    await ipc.beginDrag();
+    expect(invokeMock).toHaveBeenCalledWith('begin_drag', undefined);
+  });
+
+  it('window_state 事件直接改写渲染形态', async () => {
+    await initEvents();
+    const fire = listeners.get('window_state');
+    expect(fire, '必须订阅 window_state，否则错配无法自愈').toBeTruthy();
+
+    S.setExpanded(false);
+    fire?.({ payload: { expanded: true, width: 584, height: 500 } });
+    expect(S.state.expanded).toBe(true);
+
+    fire?.({ payload: { expanded: false, width: 264, height: 40 } });
+    expect(S.state.expanded).toBe(false);
+  });
+
+  it('撑窗口失败时不渲染面板，而是回头问 Rust 的权威值', async () => {
+    invokeMock.mockImplementation(async (cmd?: string) => {
+      if (cmd === 'expand_window') throw new Error('找不到主窗口');
+      if (cmd === 'window_state') return { expanded: false, width: 264, height: 40 };
+      return undefined;
+    });
+    focus(convOf({ peer_id: 30001 }));
+
+    await openPanel();
+
+    expect(S.state.expanded, '窗口没撑开就绝不能切成面板形态').toBe(false);
+    const cmds = invokeMock.mock.calls.map((c) => c[0]);
+    expect(cmds).toContain('window_state');
+    expect(cmds).not.toContain('load_messages');
+  });
+
+  it('resyncWindowState 跟随 Rust：Rust 说展开，界面就渲染面板', async () => {
+    invokeMock.mockImplementation(async (cmd?: string) =>
+      cmd === 'window_state' ? { expanded: true, width: 584, height: 500 } : undefined,
+    );
+    S.setExpanded(false);
+
+    await resyncWindowState();
+
+    expect(S.state.expanded).toBe(true);
+    expect(invokeMock).toHaveBeenCalledWith('window_state', undefined);
   });
 
   it('托盘请求开浮层落到 sheet 状态上，非法载荷不改状态', async () => {

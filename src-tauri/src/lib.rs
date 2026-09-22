@@ -125,6 +125,8 @@ pub fn run() {
             cmd::save_pasted_image,
             cmd::expand_window,
             cmd::collapse_window,
+            cmd::begin_drag,
+            cmd::window_state,
             cmd::set_viewing,
             cmd::exit_app,
         ])

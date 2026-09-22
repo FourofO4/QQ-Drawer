@@ -46,7 +46,9 @@ export function Bar() {
     if (e.button !== 0) return;
     dragged = false;
     start = { x: e.clientX, y: e.clientY };
-    // 交给系统拖动——但只在超过阈值后调用，否则"一拖就展开"
+    // 交给系统拖动——但只在超过阈值后调用，否则"一拖就展开"。
+    // 走 Rust 侧的 `begin_drag`：它会先抑制"失焦收起"，否则未锁定时
+    // 拖动过程中窗口会被自己收起来（折叠态窗口 + 系统还原的矩形 = 形体错乱）。
     const onMove = (ev: MouseEvent) => {
       if (start === null) return;
       const dx = Math.abs(ev.clientX - start.x);
@@ -55,7 +57,7 @@ export function Bar() {
         dragged = true;
         start = null;
         cleanup();
-        void ipc.startDragging();
+        void ipc.beginDrag();
       }
     };
     const cleanup = () => {

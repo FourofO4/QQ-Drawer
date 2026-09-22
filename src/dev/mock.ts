@@ -515,6 +515,14 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     case 'collapse_window':
       return undefined as T;
 
+    // 真实实现里它会先抑制自动收起、再交给系统拖动；假后端只有窗口内的一层 DOM，
+    // 没有可拖动的原生窗口，所以只需要不抛错
+    case 'begin_drag':
+      return undefined as T;
+
+    case 'window_state':
+      return { expanded: false, width: 264, height: 40 } as T;
+
     case 'exit_app':
       emit('toast', { text: '（mock）这里不会真的退出', kind: 'info' });
       return undefined as T;

@@ -55,6 +55,15 @@ export async function initEvents(): Promise<() => void> {
       if (!S.state.locked) requestCollapse();
     }),
 
+    /**
+     * 窗口形态的权威值。Rust 每次真的改完窗口几何之后广播，前端**只跟随**。
+     *
+     * 这是"再点一下才恢复"那个 bug 的根治手段：原来 `expanded` 有两份互不相干的副本
+     * （Rust 决定窗口多大、前端决定画折叠条还是面板），一旦错开就会永久卡在
+     * "展开尺寸的窗口里画着折叠条"。跟随这个事件之后，错配活不过一个事件周期。
+     */
+    ipc.onWindowState(({ expanded }) => S.setExpanded(expanded)),
+
     ipc.onTogglePanel(() => {
       if (S.state.expanded) requestCollapse();
       else void openPanel();
@@ -80,7 +89,16 @@ export async function openPanel(): Promise<void> {
 
   // 窗口几何由 Rust 掌握（§4.1）。这一步必须在 setExpanded 之前：
   // 顺序反了的话，内容会先按面板尺寸布局，而窗口还只有 40px 高。
-  await ipc.expand();
+  try {
+    await ipc.expand();
+  } catch (e) {
+    // 撑窗口失败：**绝不能**继续把前端切成展开态 ——
+    // 那正是"窗口是折叠尺寸、里面却画着面板"的错配。回头问一次权威值对齐。
+    console.error('[抽屉] 展开窗口失败，回退成 Rust 的权威形态', e);
+    S.showToast('展开窗口失败', 'error');
+    await resyncWindowState();
+    return;
+  }
   S.setExpanded(true);
 
   const conv = S.currentConversation();
@@ -88,6 +106,22 @@ export async function openPanel(): Promise<void> {
     await ensureMessages(conv);
     // 展开即视为已读（FR-23 / FR-32）：Rust 清未读后会把新快照推回来
     await ipc.markRead(conv.peer_type, conv.peer_id);
+  }
+}
+
+/**
+ * 用 Rust 的权威形态校正前端渲染状态。
+ *
+ * 用在两处：bootstrap 启动自检，以及 `openPanel` 失败后的回退。
+ * 它是"错配不会卡住"的最后一道保险 —— 哪怕别的路径漏了，
+ * 只要走到这里，界面就会回到与窗口几何一致的那个形态。
+ */
+export async function resyncWindowState(): Promise<void> {
+  try {
+    const s = await ipc.windowState();
+    S.setExpanded(s.expanded);
+  } catch (e) {
+    console.error('[抽屉] 读取窗口形态失败', e);
   }
 }
 

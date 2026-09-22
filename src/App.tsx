@@ -8,7 +8,7 @@
 import { Show, createEffect, onMount } from 'solid-js';
 import * as S from './state/store';
 import * as ipc from './state/ipc';
-import { initEvents } from './state/events';
+import { initEvents, resyncWindowState } from './state/events';
 import { applyThemeVars, themeVars } from './core/theme';
 import { Bar } from './ui/Bar';
 import { Panel } from './ui/Panel';
@@ -19,7 +19,6 @@ export function App() {
     void bootstrap();
     void initEvents();
   });
-
   /** 外观改动立刻反映到 CSS 变量（颜色在 JS 里算好，见 core/theme.ts） */
   createEffect(() => {
     const s = S.state.settings;
@@ -81,6 +80,10 @@ async function bootstrap(): Promise<void> {
 
   const conversations = await ipc.listConversations();
   S.setConversations(conversations);
+
+  // 窗口形态以 Rust 为准对齐一次：万一上次退出时留下了错配，
+  // 这次启动就把它纠正过来，而不是等用户"再点一下"。
+  await resyncWindowState();
 
   // 默认选中：标签栏第一个；没有标签就选折叠条那一条
   if (S.state.current === null && conversations.length > 0) {

@@ -67,6 +67,9 @@ export function Tabs() {
    */
   const startSort = (e: MouseEvent, conv: ConversationDTO) => {
     if (e.button !== 0) return;
+    // 别让这次按下冒泡到 `.tabs` 的 dragWindow —— 否则"拖标签排序"会变成
+    // "拖标签排序 + 拖动整个窗口"，两个 mousemove 处理器抢同一串鼠标事件。
+    e.stopPropagation();
     const key = peerKey(conv);
     const originX = e.clientX;
     let armed = false;
@@ -117,12 +120,16 @@ export function Tabs() {
   /** 顶栏空白区拖动窗口 */
   const dragWindow = (e: MouseEvent) => {
     if (e.button !== 0) return;
+    // 落在标签 / 按钮上的按下由它们自己（或各自的 onMouseDown）处理，
+    // 这里只接管真正的空白区。没有这道闸，拖标签会**同时**触发窗口拖动 ——
+    // 两个 mousemove 处理器一起跑，标签拖到一半窗口整块跟着位移。
+    if ((e.target as HTMLElement | null)?.closest('.tab, button, .composer')) return;
     const x0 = e.clientX;
     const y0 = e.clientY;
     const onMove = (ev: MouseEvent) => {
       if (Math.abs(ev.clientX - x0) + Math.abs(ev.clientY - y0) <= 3) return;
       window.removeEventListener('mousemove', onMove);
-      void ipc.startDragging();
+      void ipc.beginDrag();
     };
     const onUp = () => window.removeEventListener('mousemove', onMove);
     window.addEventListener('mousemove', onMove);
