@@ -221,6 +221,7 @@ let settings: SettingsDTO = {
   locked: false,
   snap_top: true,
   panel_alpha: 0.72,
+  bar_alpha: 0.72,
   bubble_alpha: 0.35,
   readability_compensation: true,
   motion: true,

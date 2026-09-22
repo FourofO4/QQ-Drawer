@@ -138,6 +138,30 @@ export function Settings() {
                   </For>
                 </div>
                 <div class="field" style={{ 'margin-top': '12px' }}>
+                  <label>收起条</label>
+                  <input
+                    type="range"
+                    min="15"
+                    max="95"
+                    value={Math.round(s().bar_alpha * 100)}
+                    onInput={(e) => void save('bar_alpha', Number(e.currentTarget.value) / 100)}
+                  />
+                  <span class="v">{Math.round(s().bar_alpha * 100)}</span>
+                </div>
+                <div class="btns">
+                  <For each={PANEL_PRESETS}>
+                    {(p) => (
+                      <button
+                        class="b"
+                        classList={{ on: Math.abs(s().bar_alpha - p.value) < 0.005 }}
+                        onClick={() => void save('bar_alpha', p.value)}
+                      >
+                        {p.label} {Math.round(p.value * 100)}
+                      </button>
+                    )}
+                  </For>
+                </div>
+                <div class="field" style={{ 'margin-top': '12px' }}>
                   <label>气泡底</label>
                   <input
                     type="range"

@@ -65,6 +65,8 @@
   --panel-b: 37;
   --panel-bg: rgba(38, 38, 37, 0.72);
   --panel-bg-flash: rgba(38, 38, 37, 0.3024);
+  --bar-bg: rgba(38, 38, 37, 0.72);
+  --bar-bg-flash: rgba(38, 38, 37, 0.3024);
   --overflow-bg: rgba(28, 28, 27, 0.95);
 
   --bub-a: 0.35;

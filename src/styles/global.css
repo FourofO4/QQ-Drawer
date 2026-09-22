@@ -82,7 +82,7 @@ button {
   gap: 9px;
   padding: 0 14px;
   border-radius: var(--r-card);
-  background: var(--panel-bg);
+  background: var(--bar-bg);
   border: 0.5px solid var(--stroke);
   overflow: hidden;
   cursor: grab;
@@ -149,11 +149,11 @@ button {
 @keyframes barflash {
   0%,
   100% {
-    background-color: var(--panel-bg);
+    background-color: var(--bar-bg);
     border-color: var(--stroke);
   }
   50% {
-    background-color: var(--panel-bg-flash);
+    background-color: var(--bar-bg-flash);
     border-color: var(--stroke-strong);
   }
 }

@@ -16,6 +16,8 @@ export const PANEL_PRESETS = [
 ] as const;
 
 export const DEFAULT_PANEL_ALPHA = 0.72;
+/** 收起态（折叠条）的底板透明度。默认与面板一致，但可单独调 */
+export const DEFAULT_BAR_ALPHA = 0.72;
 export const DEFAULT_BUBBLE_ALPHA = 0.35;
 
 /** 闪烁最暗时的面板 alpha 系数，下限 0.06 */
@@ -56,18 +58,26 @@ function rgba(r: number, g: number, b: number, a: number): string {
 
 export interface ThemeInput {
   panelAlpha: number;
+  /** 收起态折叠条的底板透明度。它和面板**互不联动**（§3.7 三层模型） */
+  barAlpha: number;
   bubbleAlpha: number;
   compensation: boolean;
 }
 
 /**
  * 计算一整套主题 CSS 变量。
- * 面板层与气泡层**各自独立、互不联动**（§3.7 三层模型）。
+ * 面板层与气泡层**各自独立、互不联动**（§3.7 三层模型）；折叠条是第三档，
+ * 它用的是**同一套**可读性补偿公式，只是代入自己的 alpha。
  */
 export function themeVars(input: ThemeInput): Record<string, string> {
-  const { panelAlpha, bubbleAlpha, compensation } = input;
+  const { panelAlpha, barAlpha, bubbleAlpha, compensation } = input;
   const [r, g, b] = panelRgb(panelAlpha, compensation);
   const flash = flashAlpha(panelAlpha);
+
+  // 折叠条：底色 RGB 跟着自己的 alpha 走补偿（越透 → 底色越深），
+  // 否则把折叠条调得很透时文字会失去衬底。
+  const [br, bg, bb] = panelRgb(barAlpha, compensation);
+  const barFlash = flashAlpha(barAlpha);
 
   // 气泡 alpha 过低时必须靠描边维持边界，否则相邻气泡会糊成一片（§3.7 边界约束）
   const otherStroke = Math.max(bubbleAlpha * 0.42, 0.13);
@@ -82,6 +92,8 @@ export function themeVars(input: ThemeInput): Record<string, string> {
     // 完整颜色串，CSS 侧禁止再套 calc()（踩坑 #1）
     '--panel-bg': rgba(r, g, b, panelAlpha),
     '--panel-bg-flash': rgba(r, g, b, flash),
+    '--bar-bg': rgba(br, bg, bb, barAlpha),
+    '--bar-bg-flash': rgba(br, bg, bb, barFlash),
     '--overflow-bg': rgba(28, 28, 27, 0.95),
 
     '--bub-a': String(bubbleAlpha),

@@ -165,6 +165,7 @@ export interface SettingsDTO {
   locked: boolean;
   snap_top: boolean;
   panel_alpha: number;
+  bar_alpha: number;
   bubble_alpha: number;
   readability_compensation: boolean;
   motion: boolean;

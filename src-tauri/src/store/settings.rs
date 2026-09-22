@@ -112,6 +112,20 @@ mod tests {
         let s = db.with(get_all).unwrap();
         assert_eq!(s.ws_url, "ws://old");
         assert_eq!(s.bubble_alpha, 0.35, "缺失的键回落到默认值");
+        assert_eq!(
+            s.bar_alpha, 0.72,
+            "老库没有 bar_alpha（收起条透明度）时回落到默认值，而不是 0（全透明等于内容消失）"
+        );
+    }
+
+    #[test]
+    fn 收起条透明度可以单独调且重启后还在() {
+        let db = Db::open_memory().unwrap();
+        db.tx(|c| set(c, "bar_alpha", &json!(0.3))).unwrap();
+
+        let s = db.with(get_all).unwrap();
+        assert_eq!(s.bar_alpha, 0.3);
+        assert_eq!(s.panel_alpha, 0.72, "调收起条不该牵动面板");
     }
 
     #[test]

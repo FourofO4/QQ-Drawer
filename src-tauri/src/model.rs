@@ -295,6 +295,7 @@ pub struct Settings {
     pub snap_top: bool,
 
     pub panel_alpha: f64,
+    pub bar_alpha: f64,
     pub bubble_alpha: f64,
     pub readability_compensation: bool,
     pub motion: bool,
@@ -330,6 +331,7 @@ impl Default for Settings {
             snap_top: true,
 
             panel_alpha: 0.72,
+            bar_alpha: 0.72,
             bubble_alpha: 0.35,
             readability_compensation: true,
             motion: true,
@@ -427,6 +429,7 @@ mod tests {
         let json = serde_json::to_value(&s).unwrap();
         assert_eq!(json["ws_url"], "ws://127.0.0.1:3001");
         assert_eq!(json["panel_alpha"], 0.72);
+        assert_eq!(json["bar_alpha"], 0.72, "收起条透明度与面板默认一致，但可单独调");
         assert_eq!(json["tab_limit"], 5);
     }
 }

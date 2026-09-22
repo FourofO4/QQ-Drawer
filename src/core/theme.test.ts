@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DEFAULT_BAR_ALPHA,
   DEFAULT_BUBBLE_ALPHA,
   DEFAULT_PANEL_ALPHA,
   FLASH_FLOOR,
@@ -47,6 +48,7 @@ describe('可读性补偿 §3.7', () => {
 describe('主题变量输出', () => {
   const vars = themeVars({
     panelAlpha: DEFAULT_PANEL_ALPHA,
+    barAlpha: DEFAULT_BAR_ALPHA,
     bubbleAlpha: DEFAULT_BUBBLE_ALPHA,
     compensation: true,
   });
@@ -63,19 +65,79 @@ describe('主题变量输出', () => {
   });
 
   it('面板层与气泡层各自独立，互不联动', () => {
-    const wide = themeVars({ panelAlpha: 0.45, bubbleAlpha: 0.35, compensation: true });
-    const narrow = themeVars({ panelAlpha: 0.45, bubbleAlpha: 0.35, compensation: true });
+    const wide = themeVars({
+      panelAlpha: 0.45,
+      barAlpha: DEFAULT_BAR_ALPHA,
+      bubbleAlpha: 0.35,
+      compensation: true,
+    });
+    const narrow = themeVars({
+      panelAlpha: 0.45,
+      barAlpha: DEFAULT_BAR_ALPHA,
+      bubbleAlpha: 0.35,
+      compensation: true,
+    });
     expect(wide['--bub-own-bg']).toBe(narrow['--bub-own-bg']);
     expect(wide['--bub-own-bg']).toBe('rgba(55, 138, 221, 0.35)');
   });
 
   it('气泡 alpha 很低时描边不会消失（边界约束）', () => {
-    const v = themeVars({ panelAlpha: 0.72, bubbleAlpha: 0.08, compensation: true });
+    const v = themeVars({
+      panelAlpha: 0.72,
+      barAlpha: DEFAULT_BAR_ALPHA,
+      bubbleAlpha: 0.08,
+      compensation: true,
+    });
     expect(v['--bub-other-stroke']).toBe('rgba(255, 255, 255, 0.13)');
   });
 
   it('溢出层底色近乎不透明，保证盖在消息上仍清晰', () => {
     expect(vars['--overflow-bg']).toBe('rgba(28, 28, 27, 0.95)');
+  });
+
+  it('折叠条底色串里的 alpha 与设置一致', () => {
+    expect(vars['--bar-bg']).toBe('rgba(39, 39, 37, 0.72)');
+    // 闪烁最暗 = 0.72 × 0.42 = 0.3024，但 rgba() 只保留三位小数
+    expect(vars['--bar-bg-flash']).toBe('rgba(39, 39, 37, 0.302)');
+  });
+
+  it('折叠条与面板的透明度各自独立：只调一个不会牵连另一个', () => {
+    const onlyBar = themeVars({
+      panelAlpha: 0.9,
+      barAlpha: 0.3,
+      bubbleAlpha: 0.35,
+      compensation: true,
+    });
+    expect(onlyBar['--panel-bg']).toBe('rgba(44, 44, 42, 0.9)');
+    expect(onlyBar['--bar-bg']).toBe('rgba(26, 26, 25, 0.3)');
+    expect(onlyBar['--panel-bg']).not.toBe(onlyBar['--bar-bg']);
+  });
+
+  it('折叠条越透则底色越深，靠补偿维持文字衬底', () => {
+    const solid = themeVars({
+      panelAlpha: 0.72,
+      barAlpha: 0.9,
+      bubbleAlpha: 0.35,
+      compensation: true,
+    });
+    const sheer = themeVars({
+      panelAlpha: 0.72,
+      barAlpha: 0.2,
+      bubbleAlpha: 0.35,
+      compensation: true,
+    });
+    expect(solid['--bar-bg']).toBe('rgba(44, 44, 42, 0.9)');
+    expect(sheer['--bar-bg']).toBe('rgba(26, 26, 25, 0.2)');
+  });
+
+  it('可读性补偿关掉时折叠条固定用 44/44/42', () => {
+    const v = themeVars({
+      panelAlpha: 0.72,
+      barAlpha: 0.3,
+      bubbleAlpha: 0.35,
+      compensation: false,
+    });
+    expect(v['--bar-bg']).toBe('rgba(44, 44, 42, 0.3)');
   });
 });
 

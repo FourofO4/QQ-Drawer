@@ -27,6 +27,7 @@ export function App() {
     applyThemeVars(
       themeVars({
         panelAlpha: s.panel_alpha,
+        barAlpha: s.bar_alpha,
         bubbleAlpha: s.bubble_alpha,
         compensation: s.readability_compensation,
       }),
