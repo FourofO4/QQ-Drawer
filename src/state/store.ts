@@ -19,8 +19,15 @@ import type {
   SettingsDTO,
 } from './types';
 import { peerKey } from '../core/preview';
-import { buildRows, type MessageRow } from '../core/grouping';
+import { createRowCache, type MessageRow } from '../core/grouping';
 import * as ipc from './ipc';
+
+/**
+ * 行对象的复用缓存。**不是**可有可无的优化：`<For>` 按引用 diff，
+ * 行对象每次全新的话，一次消息追加就会把整个渲染窗口的 DOM 全部重建 ——
+ * 连带几十次行高重测与坐标系改写，见 `core/grouping.ts` 的 `createRowCache`。
+ */
+const rowCache = createRowCache();
 
 export interface Toast {
   id: number;
@@ -127,7 +134,7 @@ const derived = createRoot(() => {
     return key === null ? [] : (state.messages[key] ?? []);
   });
 
-  const currentRows = createMemo<MessageRow[]>(() => buildRows(currentMessages(), now()));
+  const currentRows = createMemo<MessageRow[]>(() => rowCache.build(currentMessages(), now()));
 
   const canSendNow = createMemo(() => {
     const conv = currentConversation();
@@ -202,6 +209,7 @@ export function setConversations(list: ConversationDTO[]): void {
  */
 export function resetForAccount(): void {
   autoSelectPending = true;
+  rowCache.clear();
   setState({
     conversations: [],
     messages: {},

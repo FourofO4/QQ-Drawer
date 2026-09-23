@@ -13,14 +13,25 @@
  * 所以每次坐标系换代（测量回填 / 翻页插入），都先用**旧**坐标系取出锚点
  * （哪一行 + 行内偏移），再用**新**坐标系反算 `scrollTop`。见 `core/vscroll.ts`
  * 的 `anchorKeyAt` / `topForKey`。
+ *
+ * ## 三条硬约束（都踩过，改之前先读）
+ *
+ * ① **行高估值只学一次**（`estimate`）。它参与 `padTop` / `padBottom`，每来一个样本
+ *    就重算的话**所有未渲染行**会一起浮动 —— 500 行的列表里是几千像素的
+ *    `scrollHeight` 突变，滚动条抽风、渲染窗口边界乱走、引发新一波测量，自激。
+ * ② **贴底跟随只在「向下追加」时生效，翻页期间一律关闭**。否则往上翻历史会被拽回底部。
+ * ③ **程序补偿写入的 `scrollTop` 必须和用户的滚动区分开**。浏览器派发的 scroll 事件
+ *    里分不出这两者，不区分的话补偿会被当成"用户滚到底"，重新打开贴底跟随。
  */
 
-import { For, Show, createEffect, createMemo, createSignal, onCleanup } from 'solid-js';
+import { For, Show, batch, createEffect, createMemo, createSignal, onCleanup } from 'solid-js';
 import * as S from '../state/store';
 import * as ipc from '../state/ipc';
 import type { MessageRow as Row } from '../core/grouping';
 import { MessageRow } from './MessageRow';
 import {
+  ESTIMATE_SAMPLE_MIN,
+  ESTIMATED_ROW_HEIGHT,
   anchorKeyAt,
   buildOffsets,
   computeRange,
@@ -33,8 +44,12 @@ import { showMenu } from './ContextMenu';
 import { loadOlder } from '../state/events';
 
 const OVERSCAN = 10;
-/** 距底部多少像素以内算「贴底」。贴底时才自动跟随新消息 */
-const PINNED_SLACK = 40;
+/**
+ * 距底部多少像素以内算「贴底」。收得很紧，是因为它同时决定"行高回填要不要把视口
+ * 拉到底部"：阈值一松，用户往上滚个二三十像素仍被算作贴底，紧接着的回填就把他
+ * 拽回最底部（bug 3 的"向上滚动有时弹回最底部"）。
+ */
+const PINNED_SLACK = 12;
 /** 观察目标攒到这么多就先清一遍已滚出渲染区的，别让 ResizeObserver 的列表无限膨胀 */
 const OBSERVE_PRUNE_AT = 200;
 
@@ -47,15 +62,27 @@ export function MessageList() {
   /** 是否贴底——只有贴底时才跟随新消息 */
   const [pinned, setPinned] = createSignal(true);
 
+  /**
+   * 未渲染行的高度估值，**只学一次**。
+   *
+   * 首屏渲染后拿到第一批样本就把中位数钉死，此后不再变（换会话时重学）。
+   * 理由见文件头约束 ①：估值是 `padTop` / `padBottom` 的输入，让它随样本浮动就会
+   * 让所有未渲染行一起变，`scrollHeight` 突变成几千像素。
+   */
+  const [estimate, setEstimate] = createSignal<number>(ESTIMATED_ROW_HEIGHT);
+  let estimateLocked = false;
+
+  /** 翻页进行中。期间不重算贴底态、也不重复触发翻页 */
+  let paging = false;
+  /**
+   * 我们最后一次主动写入的 `scrollTop`（写入后浏览器读回来的真实值）。
+   * 用来在 scroll 事件里分辨「用户在滚」与「我们在补偿」——两者必须区别对待，
+   * 否则补偿会被当成用户滚到底部，重新打开贴底跟随（约束 ③）。
+   */
+  let programmaticTop: number | null = null;
+
   const rows = S.currentRows;
   const rowKeys = createMemo(() => rows().map((r) => r.key));
-
-  /**
-   * 未测行的估值：取已测行高的中位数，而不是固定的 44。
-   * 固定估值与真实行高差得越多，渲染窗口每滑动一行时的换算就越不平，
-   * `scrollHeight` 抖得越厉害 —— 滚动条抽风就是这么来的。
-   */
-  const estimate = createMemo(() => estimateRowHeight(Object.values(heights())));
 
   const offsets = createMemo(() => {
     const h = heights();
@@ -69,10 +96,19 @@ export function MessageList() {
     return rows().slice(w.start, w.end);
   });
 
-  /** 写滚动位置——必须同时更新信号，否则 range 会拿旧位置多渲染一帧，看着就是抖 */
+  /**
+   * 写滚动位置。
+   *
+   * ① 幂等：与当前值相同就不写 —— 否则浏览器照样派发 scroll 事件，和用户的滚动打架。
+   * ② 记下这是我们写的，供 `onScroll` 分辨。
+   */
   const writeScrollTop = (el: HTMLDivElement, top: number) => {
-    if (el.scrollTop !== top) el.scrollTop = top;
-    // 浏览器会把 scrollTop 夹到 maxScrollTop，读回来的才是真实值
+    const target = Math.max(0, Math.round(top));
+    if (Math.abs(el.scrollTop - target) >= 1) {
+      el.scrollTop = target;
+      // 浏览器会把 target 夹到合法范围：记夹取后的真实值，别记我们想要的那个
+      programmaticTop = el.scrollTop;
+    }
     setScrollTop(el.scrollTop);
   };
 
@@ -100,18 +136,40 @@ export function MessageList() {
   /**
    * 提交一批测量结果，并把「高度变了」造成的视口偏移补回去。
    * 这是 bug 3 的核心修法：测量会让 offsets 换代，不补偿视口就会跳。
-   * 贴底时改为跟到底部 —— 那时用户要的就是最新一条。
+   *
+   * 唯一例外是用户**正贴着底部**：那时他要的就是最新一条，跟到底部即可。
+   * 判断用的是本次提交时的 `pinned`，且翻页期间一律不跟（约束 ②）。
    */
   const commitHeights = (next: Record<string, number>) => {
     const el = scroller;
     if (!el) return;
+
     const keys = rowKeys();
     const anchor = anchorKeyAt(offsets(), keys, el.scrollTop);
-    const stick = pinned();
+    const stick = pinned() && !paging;
 
-    const est = estimateRowHeight(Object.values(next));
+    // 估值只学一次（约束 ①）。取样只取**当前列表**里的行：`heights` 里可能还留着
+    // 上个会话的 key，拿它们算中位数会让这批样本失真。
+    let est = estimate();
+    if (!estimateLocked) {
+      const sample: number[] = [];
+      for (const r of rows()) {
+        const v = next[r.key];
+        if (v !== undefined) sample.push(v);
+      }
+      if (sample.length >= ESTIMATE_SAMPLE_MIN) {
+        est = estimateRowHeight(sample);
+        estimateLocked = true;
+      }
+    }
+
     const nextOffsets = buildOffsets(rows().map((r) => next[r.key] ?? est));
-    setHeights(next);
+    // 两处都进 `offsets` 的依赖。分两次 set 就是两轮重算 + 两轮 DOM 更新，
+    // 批起来只算一次（估值锁定那一帧尤其明显：所有未渲染行的占位高度会一起变）。
+    batch(() => {
+      setHeights(next);
+      setEstimate(est);
+    });
 
     // 等 Solid 把新的占位高度写进 DOM 再纠正滚动位置。同一个任务内完成，用户看不到中间态。
     queueMicrotask(() => {
@@ -165,37 +223,48 @@ export function MessageList() {
   const onScroll = () => {
     const el = scroller;
     if (!el) return;
-    setScrollTop(el.scrollTop);
-    setPinned(el.scrollTop + el.clientHeight >= el.scrollHeight - PINNED_SLACK);
-    if (shouldLoadMore(el.scrollTop)) void paginateUp();
+
+    const v = el.scrollTop;
+    setScrollTop(v);
+
+    // 补偿派生出来的那次 scroll 事件不代表用户意图，跳过（约束 ③）
+    const mine = programmaticTop !== null && Math.abs(v - programmaticTop) < 1;
+    programmaticTop = null;
+    if (mine) return;
+
+    // 翻页进行中：不改贴底态、也不重复触发翻页。等待 IPC 的这几十~几百毫秒里用户
+    // 仍会继续滚，那些 scroll 事件如果重算 `pinned`，就会把刚设的 false 冲掉，
+    // 紧随其后的行高回填于是又把视口拽回底部（约束 ②）。
+    if (paging) return;
+
+    setPinned(v + el.clientHeight >= el.scrollHeight - PINNED_SLACK);
+    if (shouldLoadMore(v)) void paginateUp();
   };
 
-  let loading = false;
   /**
    * 向上翻页（FR-20）。
    *
-   * 锚点必须在 `loadOlder()` **之前**取：加载完 rows 已经变了，那时再取就对不上。
-   * 旧实现拿 `scrollHeight` 的差值去补 scrollTop —— 那个差值里混着行高测量、图片
-   * 撑开等一堆无关变化，而且只等一帧就补，补出来的位置是错的。
+   * 旧坐标系必须在 `loadOlder()` **之前**整份存下来：加载完 rows 已经变了，那时再取
+   * 就对不上。旧实现拿 `scrollHeight` 的差值去补 scrollTop —— 那个差值里混着行高测量、
+   * 图片撑开等一堆无关变化，而且只等一帧就补，补出来的位置是错的。
    */
   const paginateUp = async () => {
     const el = scroller;
-    if (el === undefined || loading) return;
-    // 旧坐标系要整份存下来。等待 IPC 的这几十~几百毫秒里用户还会继续滚，
-    // 那几下滚动都是按**旧**坐标系记的数值，直接套到新坐标系上就会错位。
+    if (el === undefined || paging) return;
+
     const beforeOffsets = offsets();
     const beforeKeys = rowKeys();
-    loading = true;
-    // 翻页意味着用户在看历史：明确退出贴底，否则紧随其后的行高测量会把视口拽回底部
-    setPinned(false);
+
+    paging = true;
+    setPinned(false); // 用户在看历史，明确退出贴底
     try {
       await loadOlder();
     } finally {
-      loading = false;
+      paging = false;
     }
-    // 把「用户此刻的滚动位置」当作旧坐标系的坐标，映射到新坐标系。
-    // 用户没滚 → 视口原地不动；用户滚过 → 尊重他滚到的地方。
-    // 两者都覆盖，才不会出现「滚了好几下却卡在中间」（bug 3）。
+
+    // 把「用户此刻的滚动位置」映射到新坐标系：没滚就原地不动，滚过了就尊重他滚到的
+    // 地方。两者都覆盖，才不会出现「滚了好几下却卡在中间」（bug 3）。
     const anchor = anchorKeyAt(beforeOffsets, beforeKeys, el.scrollTop);
     if (anchor === null) return;
     const top = topForKey(offsets(), rowKeys(), anchor.key, anchor.inner);
@@ -219,12 +288,19 @@ export function MessageList() {
       lastKeys = [];
       jumpPending = true;
       setPinned(true); // 换会话默认从最新看起
+      // 行高分布是按会话的（有人话密有人爱发图），换会话就重新学一次估值。
+      // 顺带把实测缓存丢掉：滑动窗口只有 30 行，重测很便宜，留着反而会跨会话膨胀。
+      estimateLocked = false;
+      setEstimate(ESTIMATED_ROW_HEIGHT);
+      setHeights({});
+      programmaticTop = null; // 上个会话的补偿记录对新会话没有意义
     }
     if (keys.length === 0) return;
 
     if (jumpPending) {
       jumpPending = false;
       lastKeys = keys;
+      // 跳到底部。此刻图片多半还没解码，撑高之后由 commitHeights 的贴底分支跟上。
       queueMicrotask(() => writeScrollTop(el, el.scrollHeight));
       return;
     }
@@ -234,7 +310,7 @@ export function MessageList() {
     // 只有「向下追加」才跟随。向上翻页插入历史时首行会变，那时跟到底部就成了
     // 「往上翻一页被弹回底部」的鬼打墙 —— 也是 bug 3 里"滚轮复位"的直接原因。
     if (!isAppendOnly(prev, keys)) return;
-    if (!pinned()) return;
+    if (!pinned() || paging) return;
     queueMicrotask(() => writeScrollTop(el, el.scrollHeight));
   });
 

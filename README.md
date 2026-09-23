@@ -5,7 +5,7 @@
 **电脑上不登录 QQ 客户端**——消息来自本机运行的 NapCat（无头 QQ）+ OneBot 11 WebSocket，登录态留在手机 QQ 上。
 
 > **状态**：v1.0 代码已完成，并已在本机 **真实 QQ 登录的 NapCat** 上跑通（收消息、拉会话、
-> 图片落盘、折叠条显示）。前端 154 个单测全绿，`tsc --noEmit` 无错，生产构建通过；
+> 图片落盘、折叠条显示）。前端 162 个单测全绿，`tsc --noEmit` 无错，生产构建通过；
 > Rust 侧 255 个单测全绿（`cargo test`，Windows + GNU 工具链）。第一次在本机跑 `cargo test`
 > 若报 `0xc0000139`，看 [§1.5](#15-cargo-test-与-windows-应用清单)。
 >
@@ -614,7 +614,11 @@ qq-drawer/
 2. **协议隔离**——OneBot 的一切（事件名、字段、消息段）只准出现在 `src-tauri/src/ob/` 里，上层只认 `ob::model` 的规范模型。QQ 协议改版时只动这一层。
 3. **窗口与内容解耦**——窗口的尺寸/位置/模糊效果由 Rust 掌握，前端只画内容，**永远不直接改窗口几何**。前端能做的只有三件事：请 Rust 展开、请 Rust 收起、请 Rust 开始拖动（`begin_drag` 里裹了"拖动期间抑制失焦收起"）。**窗口形态以 Rust 广播的 `window_state` 为准**，前端 store 里那份 `expanded` 只是镜像——两份各自为政过一次，代价是"展开尺寸的窗口里画着折叠条，得再点一下才恢复"。
 4. **动画不上窗口**——一切视觉动效在 CSS 层（只做 `opacity` / `transform` / `background-color`）。逐帧改窗口尺寸会让 DWM 每帧重算背景模糊，必卡。
-5. **虚拟滚动的视口位置只由锚点派生**——`offsetHeight` 量出来的行高、翻页插入的历史，都会让累计高度表 `offsets` 换代；坐标系一换，同一个 `scrollTop` 就指向别的内容了。所以每次换代都要先取锚点（**行 id + 行内偏移**）再反算 `scrollTop`，**不做任何增量加减**（见 `core/vscroll.ts` 的 `anchorKeyAt` / `topForKey`）。三条连带的红线：未测行的估值取已测行高的**中位数**（固定估值会让 `scrollHeight` 随渲染窗口抖动）；行间距做在 `.row-wrap` 的 `padding` 上而不是父级 flex `gap`（`gap` 不进 `offsetHeight`）；`ResizeObserver` 在组件函数体里建而不是 `onMount`（`ref` 回调比 `onMount` 先跑，在 `onMount` 里建会让首屏的行一个都测不到）。
+5. **虚拟滚动的视口位置只由锚点派生**——`offsetHeight` 量出来的行高、翻页插入的历史，都会让累计高度表 `offsets` 换代；坐标系一换，同一个 `scrollTop` 就指向别的内容了。所以每次换代都要先取锚点（**行 id + 行内偏移**）再反算 `scrollTop`，**不做任何增量加减**（见 `core/vscroll.ts` 的 `anchorKeyAt` / `topForKey`）。围绕它有一串红线，每一条单独都能让滚动抽风：
+   - **行高估值只学一次**（首屏样本够了就钉死，换会话才重学）。它参与 `padTop` / `padBottom`，跟着样本浮动会让**所有未渲染行**一起变——500 行列表里是几千像素的 `scrollHeight` 突变，滚动条长度跟着跳，渲染窗口边界大幅移动又引发新一波测量，自激之下滚轮直接不动了。
+   - **行对象必须复用引用**（`core/grouping.ts` 的 `createRowCache`）。`<For>` 按**引用** diff，行对象每次全新就等于"每次消息追加都重建整个渲染窗口的 DOM"，同上自激。注意 `separator` 是对象，判"没变"要逐字段比——直接 `===` 会恒为 false，让缓存**静默失效**。
+   - **程序补偿写入的 `scrollTop` 要和用户的滚动区分开**：浏览器派发的 scroll 事件里分不出这两者，不区分的话补偿会被当成"用户滚到底了"，重新打开贴底跟随。贴底阈值也收得很紧（12px），且翻页期间挂起贴底态的重算。
+   - 行间距做在 `.row-wrap` 的 `padding` 上而不是父级 flex `gap`（`gap` 不进 `offsetHeight`）；`ResizeObserver` 在组件函数体里建而不是 `onMount`（`ref` 回调比 `onMount` 先跑，在 `onMount` 里建会让首屏的行一个都测不到）。
 
 ### 测试约定
 

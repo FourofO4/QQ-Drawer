@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { MessageDTO, PeerType } from '../state/types';
-import { buildRows, oldestSeq } from './grouping';
+import { buildRows, createRowCache, oldestSeq } from './grouping';
 
 const MIN = 60_000;
 /** 固定一个"现在"，测试不依赖真实时间 */
@@ -146,5 +146,104 @@ describe('辅助函数', () => {
   it('行的 key 就是 message_id，虚拟滚动靠它做锚点', () => {
     const rows = buildRows([msg({ ts: NOW, message_id: 'abc' })], NOW);
     expect(rows[0]?.key).toBe('abc');
+  });
+});
+
+/**
+ * 这些用例钉的是一个**性能契约**，不是功能：`<For>` 按引用 diff，
+ * 行对象一旦每次全新，一次消息追加就会把整个渲染窗口的 DOM 全部销毁重建，
+ * 连带几十次行高重测与坐标系改写 —— 快速滚动时这个环会自激，滚轮就"不动了"。
+ */
+describe('行对象缓存：<For> 按引用 diff 的前提', () => {
+  it('同样的输入重复构建，行对象引用保持不变', () => {
+    const cache = createRowCache();
+    const list = [msg({ ts: NOW - 2 * MIN }), msg({ ts: NOW - 1 * MIN, message_id: 'b' })];
+
+    const first = cache.build(list, NOW);
+    const second = cache.build(list, NOW);
+
+    expect(second[0]).toBe(first[0]);
+    expect(second[1]).toBe(first[1]);
+  });
+
+  it('向下追加：旧行原样复用，只有新行是新对象', () => {
+    const cache = createRowCache();
+    const a = msg({ ts: NOW - 2 * MIN });
+    const b = msg({ ts: NOW - 1 * MIN, message_id: 'b' });
+
+    const first = cache.build([a], NOW);
+    const second = cache.build([a, b], NOW);
+
+    expect(second[0]).toBe(first[0]);
+    expect(second[1]).not.toBe(first[0]);
+    expect(second[1]?.key).toBe('b');
+  });
+
+  it('向上翻页前插：只有被顶掉首行位置的那一行重建，其余原样复用', () => {
+    const cache = createRowCache();
+    const b = msg({ ts: NOW - 2 * MIN, message_id: 'b' });
+    const c = msg({ ts: NOW - 1 * MIN, message_id: 'c' });
+    const a = msg({ ts: NOW - 10 * MIN, message_id: 'a' });
+
+    const first = cache.build([b, c], NOW);
+    const second = cache.build([a, b, c], NOW);
+
+    // b 原本是首行（分隔是「今天 13:58」），前插后降级成时刻分隔（「13:58」）→
+    // 分隔文案确实变了，这一行**必须**重建，否则界面上会挂着过期的时间标签
+    expect(second[1]).not.toBe(first[0]);
+    expect(second[1]?.separator?.kind).toBe('time');
+    // 非首行不受影响：一次翻页只重建 1 个节点，不是整窗
+    expect(second[2]).toBe(first[1]);
+  });
+
+  it('消息内容变了就换新对象，DOM 才会跟着更新', () => {
+    const cache = createRowCache();
+    const before = msg({ ts: NOW, message_id: 'a', text: '原文' });
+    const after = msg({ ts: NOW, message_id: 'a', text: '改过' });
+
+    const first = cache.build([before], NOW);
+    const second = cache.build([after], NOW);
+
+    expect(second[0]).not.toBe(first[0]);
+    expect(second[0]?.msg.text).toBe('改过');
+  });
+
+  it('前驱换人导致合并标记变化时，这一行也会重建', () => {
+    const cache = createRowCache();
+    const mine = msg({ ts: NOW - 2 * MIN, message_id: 'a', sender_id: 30011 });
+    const other = msg({ ts: NOW - 1 * MIN, message_id: 'b', sender_id: 30012 });
+
+    // 只有 a：单条，不合并
+    const alone = cache.build([mine], NOW);
+    expect(alone[0]?.cont).toBe(false);
+
+    // a + b：a 仍不合并（它没有前驱），引用应该复用
+    const withB = cache.build([mine, other], NOW);
+    expect(withB[0]).toBe(alone[0]);
+    expect(withB[1]?.cont, '换人了，b 不与 a 合并').toBe(false);
+  });
+
+  it('换会话后旧行从缓存里清掉，不会无界增长', () => {
+    const cache = createRowCache();
+    cache.build([msg({ ts: NOW, message_id: 'a' })], NOW);
+    cache.build([msg({ ts: NOW, message_id: 'b' }), msg({ ts: NOW, message_id: 'c' })], NOW);
+
+    expect(cache.size()).toBe(2);
+  });
+
+  it('clear 之后重新构建会产出新对象（换账号时用）', () => {
+    const cache = createRowCache();
+    const a = msg({ ts: NOW });
+
+    const first = cache.build([a], NOW);
+    cache.clear();
+
+    expect(cache.size()).toBe(0);
+    expect(cache.build([a], NOW)[0]).not.toBe(first[0]);
+  });
+
+  it('buildRows 仍是纯函数：两次调用给出不同的对象', () => {
+    const a = msg({ ts: NOW });
+    expect(buildRows([a], NOW)[0]).not.toBe(buildRows([a], NOW)[0]);
   });
 });

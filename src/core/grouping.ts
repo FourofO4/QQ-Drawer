@@ -36,21 +36,102 @@ export function buildRows(
   let prev: MessageDTO | null = null;
 
   for (const msg of messages) {
-    const separator = separatorFor(prev === null ? null : prev.ts, msg.ts, now);
-    const cont = isContinuation(prev, msg, separator);
-    // 私聊不标名（会话名即发送者）；自己发的一律不标名，右对齐
-    const showWho = msg.peer_type === 1 && !msg.is_self && !cont;
-
-    rows.push({
-      msg,
-      separator,
-      cont,
-      showWho,
-      key: msg.message_id,
-    });
+    rows.push({ ...deriveRow(prev, msg, now), msg, key: msg.message_id });
     prev = msg;
   }
   return rows;
+}
+
+/**
+ * 分隔是不是同一份。
+ *
+ * ⚠️ 不能直接 `===`：`separatorFor` 每次返回**新对象**，引用永远不等，
+ * 判定会恒为 false —— 缓存静悄悄地失效，行为退回"整窗重建"，而且看不出错。
+ */
+function sameSeparator(a: Separator | null, b: Separator | null): boolean {
+  if (a === b) return true;
+  if (a === null || b === null) return false;
+  return a.kind === b.kind && a.text === b.text;
+}
+
+/** 一行的全部派生字段（不含 msg 与 key 本身）——`buildRows` 与行缓存共用同一份判定 */
+function deriveRow(
+  prev: MessageDTO | null,
+  msg: MessageDTO,
+  now: number,
+): Pick<MessageRow, 'separator' | 'cont' | 'showWho'> {
+  const separator = separatorFor(prev === null ? null : prev.ts, msg.ts, now);
+  const cont = isContinuation(prev, msg, separator);
+  // 私聊不标名（会话名即发送者）；自己发的一律不标名，右对齐
+  const showWho = msg.peer_type === 1 && !msg.is_self && !cont;
+  return { separator, cont, showWho };
+}
+
+/**
+ * 行对象缓存：内容没变的行**复用同一个对象引用**。
+ *
+ * 为什么这件事是性能的关键：`<For>` 按**引用**做 diff。如果每次都产出全新的行对象，
+ * 引用全变 = 整个渲染窗口（±10 行，约 30 个）的 DOM 全部销毁重建。一次重建就是
+ * 30 个 `ref` 回调 → 30 次 `ResizeObserver` 首测 → 一轮行高回填 → 回填改写坐标系 →
+ * 又触发一轮渲染。快速滚动时这个环会自激，主线程被吃满，滚轮就"不动了"。
+ *
+ * 有缓存之后，新来一条消息只新建 1 个行对象、只创建 1 个 DOM 节点，其余全部复用。
+ */
+export interface RowCache {
+  build(messages: readonly MessageDTO[], now?: number): MessageRow[];
+  /** 清空缓存（换账号等整表重置的场合） */
+  clear(): void;
+  /** 当前缓存的行数——测试与排障用 */
+  size(): number;
+}
+
+export function createRowCache(): RowCache {
+  const cache = new Map<string, MessageRow>();
+
+  return {
+    build(messages, now = Date.now()) {
+      const out: MessageRow[] = [];
+      const live = new Set<string>();
+      let prev: MessageDTO | null = null;
+
+      for (const msg of messages) {
+        const key = msg.message_id;
+        live.add(key);
+
+        const hit = cache.get(key);
+        const derived = deriveRow(prev, msg, now);
+        if (
+          hit !== undefined &&
+          hit.msg === msg &&
+          hit.cont === derived.cont &&
+          hit.showWho === derived.showWho &&
+          sameSeparator(hit.separator, derived.separator)
+        ) {
+          out.push(hit);
+        } else {
+          const row: MessageRow = { ...derived, msg, key };
+          cache.set(key, row);
+          out.push(row);
+        }
+        prev = msg;
+      }
+
+      // 不在当前列表里的（切会话、删消息、换账号）连同缓存一起丢掉，避免无界增长。
+      // 只在确实有多余项时遍历，省掉每帧一次的全量扫描。
+      if (cache.size > live.size) {
+        for (const k of cache.keys()) if (!live.has(k)) cache.delete(k);
+      }
+      return out;
+    },
+
+    clear() {
+      cache.clear();
+    },
+
+    size() {
+      return cache.size;
+    },
+  };
 }
 
 function isContinuation(
