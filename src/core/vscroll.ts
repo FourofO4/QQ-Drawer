@@ -129,6 +129,14 @@ export interface Anchor {
  */
 export interface AnchorKey {
   key: string;
+  /**
+   * 这一行的顶边在容器内容区顶边**之上**多少像素；**允许为负**。
+   *
+   * 负值出现在「列表顶端还没铺满」的时候：容器有自己的 `padding-top`（这里 12px），
+   * 列表又正好滚到最顶上，此时第一行的顶边就在容器顶边**下方** 12px 处 —— 视口顶边
+   * 落在第一行上方的那段空白里。记成 0 会让补偿把这一行顶到容器顶边上，翻一页就
+   * 差一个内边距（实测 12px，肉眼看得见的一跳）。
+   */
   inner: number;
 }
 
@@ -236,6 +244,43 @@ export function mergeMeasured(
   return next === null ? { heights: heights as Record<string, number>, changed: false } : { heights: next, changed: true };
 }
 
+/**
+ * 由「每行顶边相对容器内容区顶边的偏移」取锚点。
+ *
+ * 传入的行必须**按渲染顺序**排列、且 `top` 是当场量出来的真实值。取「`top ≤ 0` 里
+ * 最靠下的那一行」＝视口顶边所落的那一行；`inner` 就是顶边越过该行顶边的像素数。
+ *
+ * 这是唯一不掺任何估值的锚点来源：原来的做法是拿「累计高度表 + scrollTop」反推，
+ * 而那张表里混着未渲染行的估值（真机上短句 30px、图片行 184px），反推出来的行号
+ * 可以是错的 —— 那就是"翻一页落到很上边的聊天记录"。量 DOM 没有这个环节。
+ */
+export function anchorFromTops(
+  measured: readonly { key: string; top: number }[],
+): AnchorKey | null {
+  let hit: { key: string; top: number } | null = null;
+  for (const m of measured) {
+    if (m.top <= 0.5) hit = m;
+    else break;
+  }
+  if (hit !== null) return { key: hit.key, inner: Math.max(0, -hit.top) };
+  // 一行都没越过容器顶边：视口顶边落在列表顶端的那段空白里（容器的 padding-top，
+  // 或者列表顶上还没铺满）。这时锚点就是**第一行**，`inner` 取负值 —— 它如实记下
+  // "这一行的顶边还在容器顶边下方多少像素"，补偿时才不会把整段空白吃掉。
+  const first = measured[0];
+  return first === undefined ? null : { key: first.key, inner: -first.top };
+}
+
+/**
+ * 把视口位置钉回锚点：这一步**不查高度表**。
+ *
+ * `offset` 是锚点行此刻在视口坐标里的顶边偏移（当场量的）。锚点要求它的顶边落在
+ * 容器顶边**上方** `inner` 像素处（`inner` 可为负，见 `AnchorKey`），也就是这行的
+ * 顶边偏移应该是 `-inner`。它现在在 `offset`，所以视口整体推 `offset + inner` 像素。
+ */
+export function alignToAnchor(scrollTop: number, offset: number, inner: number): number {
+  return scrollTop + offset + inner;
+}
+
 /** 坐标系换代后视口该怎么走 */
 export type ViewportAction =
   /** 跳到底部：换会话、或用户本来就贴着底、又来了新消息 */
@@ -251,11 +296,15 @@ export type ViewportAction =
  * 三条判据的由来：
  * - **`coordChanged` 为假就 `hold`**。用户的滚动也会被响应式系统看到，但它不改行序、
  *   也不改行高 —— 坐标系没换代时去「校正」视口，就是把用户刚滚出来的位置又拽回去。
- * - **贴底跟随只认「向下追加」**。翻页是往前面插历史，首行换了人；这时跟到底部，
- *   就是「往上翻一页被弹回底部」的鬼打墙。所以翻页（`paging`）期间一律 `pin`。
- * - **`paging` 期间用户可能已经滚到别处**，`pin` 用的是他此刻的位置，不是翻页前那个。
+ * - **没贴底就是在看历史，一律钉住**。翻页是往前面插历史，首行换了人；这时跟到底部，
+ *   就是「往上翻一页被弹回底部」的鬼打墙。翻页那一轮 `pinned` 已被置为 false，
+ *   所以这里不需要再为它单开一条规则。
  * - **行序没动、只有行高变了**（图片解码完、字体换行算准了）也要跟：贴底时那是新内容
  *   把底部往下推，不跟的话用户就停在半截。所以只有**行序变化**才需要分追加与前插。
+ *
+ * ⚠️ 补偿**不在**这里执行，它只回答"要不要动视口"。实际怎么动由 `ui/MessageList.tsx`
+ * 的 `settle` 决定，那是量 DOM 的闭环补偿 —— 只用一张混着估值的高度表反算位置，
+ * 真机上（图片行 184px vs 文字行 30px）会算到别的消息上去。
  */
 export function planViewport(o: {
   /** 行序整个换了一批（换会话） */
@@ -270,18 +319,9 @@ export function planViewport(o: {
   appended: boolean;
   /** 用户此刻贴着底部 */
   pinned: boolean;
-  /** 正在向上翻页 */
-  paging: boolean;
 }): ViewportAction {
   if (o.peerChanged || o.jumpPending) return 'jump-bottom';
   if (!o.coordChanged) return 'hold';
-  // 翻页期间这个 effect 让路：位置的补偿由翻页流程自己做（`ui/MessageList.tsx` 的
-  // `paginateUp`）。它既持有跨 await 取好的锚点，又跑在 async 上下文里 ——
-  // 那里写信号能同步推进 DOM，测量/补偿的迭代才真的收敛；而 effect 执行期间
-  // Solid 的更新队列是锁的，迭代第二轮量到的还是同一批 DOM，补出来的位置是偏的。
-  if (o.paging) return 'hold';
-  // 没贴底就是在看历史，钉住别动。翻页已经在上一条让开了，这里的 `pinned` 是
-  // "用户真的停在底部"的那一次判定。
   if (!o.pinned) return 'pin';
   // 贴底：只有「往前面插了东西」才不能跟（那种情况首行会换人，见 `isAppendOnly`）
   if (!o.orderChanged || o.appended) return 'jump-bottom';

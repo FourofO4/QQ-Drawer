@@ -353,6 +353,20 @@ export async function installMockBackend(): Promise<void> {
 
 /* ------------------------------ 命令实现 ------------------------------ */
 
+/**
+ * 模拟 IPC 往返：真机取一页历史要问本地库、不够还得问 NapCat，几百毫秒是常态。
+ *
+ * 假后端返回得太快会**掩盖掉「加载中用户还在滚」那一整类问题**，所以默认按真机补延迟。
+ * 自动化验证要拉长观察窗口时用 `?latency=900` 调。
+ */
+const LOAD_LATENCY_MS = (() => {
+  if (typeof window === 'undefined') return 350;
+  const q = new URLSearchParams(window.location.search).get('latency');
+  const n = Number(q);
+  return Number.isFinite(n) && n >= 0 ? n : 350;
+})();
+const sleep = (ms: number): Promise<void> => new Promise((r) => window.setTimeout(r, ms));
+
 export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const a = args ?? {};
   const peerType = a['peerType'] as 0 | 1 | undefined;
@@ -375,6 +389,9 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const limit = (a['limit'] as number) ?? 30;
       const all = key === null ? [] : (messages[key] ?? []);
       const older = beforeSeq === null ? all : all.filter((m) => (m.seq ?? 0) < beforeSeq);
+      // 真机的这一页要先查本地库、不够还得跟 NapCat 要，几百毫秒是常态。
+      // 假后端返回得太快会**掩盖掉「加载中用户还在滚」那一整类问题**，所以按真机补延迟。
+      await sleep(LOAD_LATENCY_MS);
       return older.slice(-limit) as T;
     }
 

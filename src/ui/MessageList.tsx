@@ -37,6 +37,8 @@ import { MessageRow } from './MessageRow';
 import {
   ESTIMATE_SAMPLE_MIN,
   ESTIMATED_ROW_HEIGHT,
+  alignToAnchor,
+  anchorFromTops,
   anchorKeyAt,
   buildOffsets,
   computeRange,
@@ -103,10 +105,21 @@ export function MessageList() {
   });
 
   const win = createMemo(() => computeRange(scrollTop(), viewportH(), offsets(), OVERSCAN));
-  const range = createMemo<Row[]>(() => {
+  /**
+   * 补偿期间把渲染窗口从列表顶端铺满。**只在前插历史时短暂开启**：那一批新行的
+   * 真实行高必须一次量到，否则剩下的估值会在之后被逐个换成实测值，总高度一变再变
+   * —— 用户看到的就是滚动条闪、长短不一（bug 3 第一条反馈）。
+   */
+  const [wide, setWide] = createSignal(false);
+  const view = createMemo(() => {
     const w = win();
-    return rows().slice(w.start, w.end);
+    return wide() ? { start: 0, end: w.end } : w;
   });
+  const range = createMemo<Row[]>(() => rows().slice(view().start, view().end));
+  const padTop = createMemo(() => offsets()[view().start] ?? 0);
+  const padBottom = createMemo(() =>
+    Math.max(0, (offsets()[rows().length] ?? 0) - (offsets()[view().end] ?? 0)),
+  );
 
   /**
    * **唯一**的滚动位置写入口。
@@ -117,18 +130,63 @@ export function MessageList() {
    *    位置从此与实际错开。
    * ② 把逻辑位置跟上。`range` 由它派生，慢一帧的话，这一帧渲染的就是「新坐标系 +
    *    旧位置」算出来的、完全不在视口附近的行。
+   *
+   * 返回「位置真的动了没有」：补偿要迭代到不动为止，靠它判收敛（比猜轮数可靠）。
    */
-  const applyTop = (el: HTMLDivElement, top: number) => {
+  const writeTop = (el: HTMLDivElement, top: number): boolean => {
     const before = el.scrollTop;
     const target = Math.round(top);
+    let moved = false;
     // 幂等：和当前值相同就别写。写了浏览器照样派发 scroll 事件，和用户的滚动打架。
     if (Math.abs(before - target) >= 1) {
       el.scrollTop = target;
       // 值真的动了才记 —— 目标越界被夹回原值时不派发 scroll 事件，记下去就成了一笔
       // 永远对不上的账，之后用户在附近滚一下会被误判成"我们自己写的"给吞掉。
-      if (el.scrollTop !== before) expectTop = el.scrollTop;
+      if (el.scrollTop !== before) {
+        expectTop = el.scrollTop;
+        moved = true;
+      }
     }
     if (scrollTop() !== el.scrollTop) setScrollTop(el.scrollTop);
+    return moved;
+  };
+
+  /* --------------------- 视口的真值：DOM（不是估值） --------------------- */
+
+  /**
+   * 容器内容区的顶边在视口坐标里的位置。
+   * `.msgs` 没有边框，所以 border-box 顶边就是 padding-box 顶边，可以直接当基准。
+   */
+  const contentBase = (el: HTMLDivElement): number => el.getBoundingClientRect().top;
+
+  /**
+   * 视口顶边落在**哪一行**、行内多少像素。
+   *
+   * 这是整套视口逻辑里唯一不依赖任何估值的量：行就在眼前，位置直接量。
+   * 原来的做法是拿「累计高度表 + scrollTop」反推 —— 那张表里混着未渲染行的**估值**，
+   * 真机上（图片行 184px vs 文字行 30px）估值与实测能差一大截，反推出来的锚点落在
+   * 别的行上，于是"翻一页就跳到很上边的聊天记录"。量 DOM 则完全没有这个环节。
+   *
+   * 取「顶边在容器顶之上、且最靠下的那一行」＝视口顶边所落的那一行。
+   */
+  const anchorFromDom = (el: HTMLDivElement): AnchorKey | null => {
+    const base = contentBase(el);
+    const tops: { key: string; top: number }[] = [];
+    for (const node of el.querySelectorAll<HTMLElement>('.row-wrap')) {
+      const key = node.dataset.key;
+      if (key === undefined || key === '') continue;
+      tops.push({ key, top: node.getBoundingClientRect().top - base });
+    }
+    return anchorFromTops(tops);
+  };
+
+  /** 某一行此刻在视口坐标里的顶边偏移；它不在渲染窗口里时返回 null */
+  const rowOffset = (el: HTMLDivElement, key: string): number | null => {
+    const base = contentBase(el);
+    for (const node of el.querySelectorAll<HTMLElement>('.row-wrap')) {
+      if (node.dataset.key === key) return node.getBoundingClientRect().top - base;
+    }
+    return null;
   };
 
   /* ------------------------------ 行高测量 ------------------------------ */
@@ -207,59 +265,87 @@ export function MessageList() {
 
   /** 已经排了一次补偿微任务，同一批里后面的请求合并掉 */
   let restoreQueued = false;
+  /** 这批补偿要先把渲染窗口从列表顶端铺满（前插历史时用，见 `settle`） */
+  let widePending = false;
 
   /**
    * 取「视口顶边落在哪一行、行内偏移多少」。
    *
-   * ⚠️ 必须与当前 `offsets` **同代**：`offsets` 一换代（行高回填、前插历史），
-   * 同一个 `scrollTop` 就指向别的内容了。所以只能在"没有测量与插入夹在中间"的
-   * 时刻调用——`onScroll` 里、以及 `restore` 刚写完位置时。
+   * **优先量 DOM**，量不到（那一行还没进渲染窗口）才退回坐标系反推。
+   * 前者是真实布局，后者混着估值 —— 真机上行高差异大（图片 184px vs 文字 30px），
+   * 估值反推出来的行号可以是错的，那就是"翻页后落到别的消息上"。
    */
   const captureAnchor = (el: HTMLDivElement): AnchorKey | null =>
-    anchorKeyAt(offsets(), rowKeys(), el.scrollTop);
+    anchorFromDom(el) ?? anchorKeyAt(offsets(), rowKeys(), el.scrollTop);
 
   /**
-   * 把视口搬回锚点。**唯一的补偿入口**。
+   * 把视口钉回锚点。**唯一的补偿入口**。
    *
-   * ## 为什么必须跑在微任务 / async 上下文里，而不能直接在 `createEffect` 里做
+   * ## 为什么必须是「量 DOM」，而不是「按累计高度表算」
    *
-   * `createEffect` 执行期间 Solid 的更新队列是锁住的：`setHeights` / `setScrollTop`
-   * 都不会立刻改 DOM。于是"测量 → 补偿 → 再测量"的迭代第二轮量到的还是同一批 DOM，
-   * 等于没迭代。微任务里 `ExecCount` 已经归零，写信号会同步推进 DOM，迭代才真收敛。
+   * 高度表里混着未渲染行的估值：翻页插入的一页里，只有落进渲染窗口的那部分量到了
+   * 真实高度，其余仍是估值（真机上短句 30px、图片行 184px，差一个数量级）。按这种表
+   * 反算出来的锚点位置本身就是错的 —— 用户看到的就是"翻一页，视口落到很上边的记录"。
    *
-   * ## 迭代为什么必要
+   * 而锚点行**一定在视口附近**，也就是一定在渲染窗口里，它的真实位置随时能量。
+   * 所以补偿改成两步：先用坐标系把锚点行拉进窗口（粗定位，允许不准），
+   * 再读它的 DOM 真值把位置钉死（精定位，误差归零）。任何一层估值出问题都不会
+   * 传导到最终位置 —— 这是「闭环」而不是「开环」。
    *
-   * 锚点行**前面**可能夹着从没渲染过、只有估值的行。翻页插进来一页（30 条），视口
-   * 只盖得住其中一部分，剩下的按估值算——而估值与真实行高能差一倍（短句 vs 图片行），
-   * 这一页的锚点位置就整体偏出去。实测：`scrollTop` 需要 3021px 却走了 3283px，
-   * 视口停在别的消息上（"衔接不准"）。
+   * ## 为什么前插一整批时要先把窗口铺满
    *
-   * 每轮补偿都会把新的一批行拉进渲染窗口（`applyTop` 改位置 → `range` 换批 → DOM 更新），
-   * 下一轮它们就是实测值了。两轮就能把锚点行前面的行全部测到。
+   * 只量渲染窗口盖住的那部分，剩下那些行的估值会在之后被陆续换成实测值，每换一次
+   * 总高度就变一次 —— 那就是"滚动条一直闪、长短不一"。前插时把窗口从列表顶端铺到
+   * 锚点之后，整批一次量准，总高度当场定下来。
    */
-  const restore = (el: HTMLDivElement) => {
-    const a = anchor;
-    if (a === null) return;
+  const settle = (el: HTMLDivElement, a: AnchorKey) => {
+    let coarseDone = false;
     for (let pass = 0; pass < MAX_SETTLE_PASSES; pass += 1) {
       const measured = measureRendered(el);
-      const top = topForKey(offsets(), rowKeys(), a.key, a.inner);
-      if (top !== null) applyTop(el, top);
-      if (!measured) break;
+      const off = rowOffset(el, a.key);
+      let moved = false;
+      if (off !== null) {
+        // 精定位：这一行现在在视口里偏移 `off`，要让它回到"锚点内偏移"处
+        moved = writeTop(el, alignToAnchor(el.scrollTop, off, a.inner));
+      } else if (!coarseDone) {
+        // 粗定位：锚点行还没进窗口，先用坐标系把它拉过来
+        const top = topForKey(offsets(), rowKeys(), a.key, a.inner);
+        if (top !== null) moved = writeTop(el, top);
+        coarseDone = true;
+      }
+      // 位置不动、也没有新测量 → 收敛
+      if (!moved && !measured) break;
     }
+  };
+
+  const restore = (el: HTMLDivElement, prepended: boolean) => {
+    const a = anchor;
+    if (a === null) return;
+    if (prepended) {
+      setWide(true);
+      settle(el, a);
+      // 收窄回正常窗口后会重新布局，得再钉一次位置
+      setWide(false);
+    }
+    settle(el, a);
     // 落点已定，把锚点重新对齐到**实际**位置，下次换代拿它当基准才是准的
-    anchor = captureAnchor(el);
+    anchor = anchorFromDom(el) ?? a;
   };
 
   /**
    * 排一次补偿。合并同一批里的重复请求——`offsets` 换代常常连着好几次
    * （测量、回填各来一轮），每轮都单独补一次会互相打架。
    */
-  const scheduleRestore = () => {
+  const scheduleRestore = (prepended: boolean) => {
+    // 前插一整批时要先铺满窗口量准，取「或」——同一批里只要有一次是前插就得铺
+    widePending ||= prepended;
     if (restoreQueued) return;
     restoreQueued = true;
     queueMicrotask(() => {
       restoreQueued = false;
-      if (scroller !== undefined) restore(scroller);
+      const p = widePending;
+      widePending = false;
+      if (scroller !== undefined) restore(scroller, p);
     });
   };
 
@@ -361,15 +447,17 @@ export function MessageList() {
     // 处理即可，别误判成"往前面插了东西"。
     const orderChanged =
       prevKeys === null || keys.length !== prevKeys.length || keys[0] !== prevKeys[0];
+    const appended = orderChanged && isAppendOnly(prevKeys ?? [], keys);
+    // 往前面插了一整批历史（翻页）。这种换代要把整批量准，见 `restore`。
+    const prepended = orderChanged && !appended && !peerChanged;
 
     const action = planViewport({
       peerChanged,
       jumpPending,
       coordChanged,
       orderChanged,
-      appended: orderChanged && isAppendOnly(prevKeys ?? [], keys),
+      appended,
       pinned: pinned(),
-      paging,
     });
     if (action === 'hold') return;
 
@@ -378,13 +466,14 @@ export function MessageList() {
     if (action === 'jump-bottom') {
       // 此刻图片多半还没解码，撑高之后坐标系会再变一轮，那一轮继续跟
       anchor = null;
-      applyTop(el, el.scrollHeight);
-      anchor = captureAnchor(el);
+      writeTop(el, el.scrollHeight);
+      anchor = anchorFromDom(el);
       return;
     }
 
-    // 钉锚点交给微任务去做 —— 只有在那个上下文里，测量与补偿才能同步迭代（见 `restore`）
-    scheduleRestore();
+    // 钉锚点交给微任务去做 —— 只有在那个上下文里，写信号才能同步推进 DOM，
+    // 「量 → 修 → 再量」的闭环才真的收敛（见 `settle`）
+    scheduleRestore(prepended);
   });
 
   /* ------------------------------ 滚动与翻页 ------------------------------ */
@@ -415,25 +504,18 @@ export function MessageList() {
   /**
    * 向上翻页（FR-20）。
    *
-   * 补偿**在这里做**，而不是交给上面那个统一入口，原因只有一个：`createEffect` 里
-   * Solid 的更新队列是锁住的，"测量 → 补偿 → 再测量"的迭代第二轮量到的还是同一批 DOM，
-   * 等于没迭代。而 `loadOlder` 的 `setState` 跑在 async 上下文里，它一返回 DOM 就已经
-   * 换成新行序了 —— 正好可以同步迭代地把视口钉回锚点（见 `restore`）。
+   * 这里**不做位置补偿**：`loadOlder` 一改行序，上面那个统一入口就会排一次补偿，用
+   * 「用户翻页前正看着的那一行」把视口钉回去。两条补偿路径互相推翻过一次（翻页那条
+   * 拿的是翻页前的锚点快照，和用户在这期间滚出来的位置打架），所以只保留一条。
+   *
+   * 这里只负责一个闸：别再重复发请求。
    */
   const paginateUp = async () => {
-    const el = scroller;
-    if (el === undefined || paging) return;
+    if (scroller === undefined || paging) return;
     paging = true;
     setPinned(false); // 用户在看历史，明确退出贴底
-    // 锚点必须在**翻页前**取。等 `loadOlder` 返回再取就晚了：那时行序与高度表都已换代，
-    // 用新坐标系去解释旧的 `scrollTop`，取到的是另一行 —— 视口就是这么漂走的。
-    const before = captureAnchor(el);
     try {
       await loadOlder();
-      if (before !== null) {
-        anchor = before;
-        restore(el);
-      }
     } finally {
       paging = false;
     }
@@ -491,7 +573,7 @@ export function MessageList() {
         <div class="loading-hint">正在加载更早的消息…</div>
       </Show>
 
-      <div class="vr-pad" style={{ height: `${win().padTop}px` }} />
+      <div class="vr-pad" style={{ height: `${padTop()}px` }} />
 
       <For each={range()}>
         {(row) => (
@@ -505,7 +587,7 @@ export function MessageList() {
         )}
       </For>
 
-      <div class="vr-pad" style={{ height: `${win().padBottom}px` }} />
+      <div class="vr-pad" style={{ height: `${padBottom()}px` }} />
 
       <Show when={rows().length === 0}>
         <div class="empty-hint">

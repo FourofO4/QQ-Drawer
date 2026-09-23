@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import {
   ESTIMATE_SAMPLE_MIN,
   ESTIMATED_ROW_HEIGHT,
+  alignToAnchor,
   anchorAt,
+  anchorFromTops,
   anchorKeyAt,
   anchorTop,
   buildOffsets,
@@ -211,6 +213,65 @@ describe('追加与前插的区分', () => {
   });
 });
 
+describe('以 DOM 真值取锚点', () => {
+  it('取「顶边在容器顶之上」里最靠下的那一行', () => {
+    const r = anchorFromTops([
+      { key: 'a', top: -120 },
+      { key: 'b', top: -40 },
+      { key: 'c', top: 12 },
+      { key: 'd', top: 60 },
+    ]);
+    expect(r).toEqual({ key: 'b', inner: 40 });
+  });
+
+  it('视口顶正好落在某行顶边 → inner 为 0', () => {
+    expect(anchorFromTops([{ key: 'a', top: -30 }, { key: 'b', top: 0 }])).toEqual({
+      key: 'b',
+      inner: 0,
+    });
+  });
+
+  it('一行都没越过容器顶边 → 取第一行，inner 记成负数（顶上那段空白要留在原位）', () => {
+    // 列表滚到最顶上时：行顶边还在容器顶边下方 18px（容器的 padding-top）
+    expect(anchorFromTops([{ key: 'a', top: 18 }, { key: 'b', top: 130 }])).toEqual({
+      key: 'a',
+      inner: -18,
+    });
+  });
+
+  it('亚像素抖动不该换行', () => {
+    expect(anchorFromTops([{ key: 'a', top: -8 }, { key: 'b', top: 0.4 }])).toEqual({
+      key: 'b',
+      inner: 0,
+    });
+  });
+
+  it('没有可量的行 → null（交给调用方退回坐标系）', () => {
+    expect(anchorFromTops([])).toBeNull();
+  });
+});
+
+describe('按 DOM 真值钉回锚点', () => {
+  it('行在视口里偏移多少，就把视口推多少', () => {
+    // 锚点行此刻在容器顶下方 37px，而我们希望它顶边在容器顶上方 40px
+    expect(alignToAnchor(1000, 37, 40)).toBe(1077);
+  });
+
+  it('偏移为 0、inner 为 0 → 位置不动', () => {
+    expect(alignToAnchor(1000, 0, 0)).toBe(1000);
+  });
+
+  it('行跑到容器顶上方去了（内容变矮）→ 视口往回退', () => {
+    expect(alignToAnchor(1000, -25, 0)).toBe(975);
+  });
+
+  it('列表顶端：行顶边在容器顶下方 12px（inner 为负）→ 这 12px 不能被吃掉', () => {
+    // 回归：原来是 `Math.max(0, ...)` 把它压成 0，翻一页就少 12px
+    expect(alignToAnchor(0, 12, -12)).toBe(0);
+    expect(alignToAnchor(2000, 12, -12)).toBe(2000);
+  });
+});
+
 describe('触底判定', () => {
   it('贴到顶部阈值内才触发加载更早的一页', () => {
     expect(shouldLoadMore(0)).toBe(true);
@@ -271,7 +332,6 @@ describe('坐标系换代后视口动作', () => {
     orderChanged: true,
     appended: false,
     pinned: false,
-    paging: false,
   };
 
   it('用户只是滚动（坐标系没换代）→ 不碰视口', () => {
@@ -292,15 +352,12 @@ describe('坐标系换代后视口动作', () => {
     expect(planViewport({ ...silent, appended: true, pinned: false })).toBe('pin');
   });
 
-  it('翻页期间这个 effect 让路（补偿由翻页流程自己做，两边各补一次会打架）', () => {
-    expect(planViewport({ ...silent, appended: true, pinned: true, paging: true })).toBe('hold');
-    expect(planViewport({ ...silent, appended: false, pinned: false, paging: true })).toBe('hold');
-  });
-
-  it('翻页期间即使贴着底也不跟到底部（回归"往上翻一页被弹回底部"）', () => {
-    expect(
-      planViewport({ ...silent, orderChanged: false, appended: false, pinned: true, paging: true }),
-    ).not.toBe('jump-bottom');
+  it('翻页（前插历史）时哪怕贴着底也绝不跳底部 —— 回归"往上翻一页被弹回底部"', () => {
+    // 翻页期间 `paginateUp` 会把 `pinned` 置 false，所以正常走的就是 `pin`；
+    // 这条钉的是"万一 pinned 还是 true"，也只有一个动作：钉住。
+    expect(planViewport({ ...silent, orderChanged: true, appended: false, pinned: true })).toBe(
+      'pin',
+    );
   });
 
   it('向上翻页（首行换了人）不算追加 → 钉锚点，绝不跟到底部', () => {
