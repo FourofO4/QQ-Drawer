@@ -357,6 +357,10 @@ button {
      间距，30 行就是 261px 的系统性偏差 —— 虚拟滚动的坐标系跟真实布局对不上，
      滚动条就会抽。间距做在 .row-wrap 的 padding 上。 */
   scrollbar-gutter: stable;
+  /* 锚定权必须独占。浏览器的 scroll anchoring 会在"上方内容变高"时自己改 scrollTop
+     （虚拟滚动把 padTop 从估值换成实测就是这种场合），和我们按锚点算出来的补偿叠加
+     成双份偏移 —— 表现是载入新历史时衔接不准、位置偶尔闪。 */
+  overflow-anchor: none;
 }
 
 .vr-pad {

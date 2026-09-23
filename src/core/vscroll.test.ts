@@ -10,6 +10,8 @@ import {
   estimateRowHeight,
   indexAt,
   isAppendOnly,
+  mergeMeasured,
+  planViewport,
   shouldLoadMore,
   topForKey,
 } from './vscroll';
@@ -214,5 +216,99 @@ describe('触底判定', () => {
     expect(shouldLoadMore(0)).toBe(true);
     expect(shouldLoadMore(48)).toBe(true);
     expect(shouldLoadMore(49)).toBe(false);
+  });
+});
+
+describe('同步测量合并', () => {
+  const base = { a: 44, b: 60 };
+
+  it('量到的值一个都没变时，原样返回旧表且 changed=false', () => {
+    // 这条是性能契约：变了才返回新对象，不然每次校正都会白触发一轮渲染
+    const r = mergeMeasured(base, [
+      { key: 'a', height: 44 },
+      { key: 'b', height: 60 },
+    ]);
+    expect(r.changed).toBe(false);
+    expect(r.heights).toBe(base);
+  });
+
+  it('只更新量到变化的那些键，其余原样保留', () => {
+    const r = mergeMeasured(base, [
+      { key: 'a', height: 44 },
+      { key: 'b', height: 72 },
+      { key: 'c', height: 30 },
+    ]);
+    expect(r.changed).toBe(true);
+    expect(r.heights).toEqual({ a: 44, b: 72, c: 30 });
+    // 原表不能被改（它是上个渲染帧还在用的那份）
+    expect(base).toEqual({ a: 44, b: 60 });
+  });
+
+  it('量到 0 / 负数 / NaN / 空 key 的样本一律丢掉', () => {
+    // 行还没进布局时 offsetHeight 是 0，收下来等于给坐标系挖一个洞
+    const r = mergeMeasured(base, [
+      { key: 'a', height: 0 },
+      { key: 'b', height: -3 },
+      { key: 'c', height: Number.NaN },
+      { key: '', height: 50 },
+    ]);
+    expect(r.changed).toBe(false);
+    expect(r.heights).toBe(base);
+  });
+
+  it('空表与新行：新行作为新键并入', () => {
+    const r = mergeMeasured({}, [{ key: 'x', height: 55 }]);
+    expect(r.changed).toBe(true);
+    expect(r.heights).toEqual({ x: 55 });
+  });
+});
+
+describe('坐标系换代后视口动作', () => {
+  const silent = {
+    peerChanged: false,
+    jumpPending: false,
+    coordChanged: true,
+    orderChanged: true,
+    appended: false,
+    pinned: false,
+    paging: false,
+  };
+
+  it('用户只是滚动（坐标系没换代）→ 不碰视口', () => {
+    // 回归：把用户的滚动也当成"换代"去校正，就是把刚滚出来的位置又拽回去
+    expect(planViewport({ ...silent, coordChanged: false })).toBe('hold');
+  });
+
+  it('换会话 / 首屏没定位过 → 跳到底部', () => {
+    expect(planViewport({ ...silent, peerChanged: true })).toBe('jump-bottom');
+    expect(planViewport({ ...silent, jumpPending: true })).toBe('jump-bottom');
+  });
+
+  it('贴着底 + 尾部追加 → 跟到底部', () => {
+    expect(planViewport({ ...silent, appended: true, pinned: true })).toBe('jump-bottom');
+  });
+
+  it('用户在看历史（没贴底）+ 尾部追加 → 钉住锚点，不能被拽走', () => {
+    expect(planViewport({ ...silent, appended: true, pinned: false })).toBe('pin');
+  });
+
+  it('翻页期间一律钉锚点，哪怕此刻贴着底（回归"往上翻一页被弹回底部"）', () => {
+    expect(planViewport({ ...silent, appended: true, pinned: true, paging: true })).toBe('pin');
+  });
+
+  it('向上翻页（首行换了人）不算追加 → 钉锚点，绝不跟到底部', () => {
+    expect(planViewport({ ...silent, appended: false, pinned: true })).toBe('pin');
+  });
+
+  it('行序没动、只有行高回填：贴底时仍要跟（图片撑开是新内容把底部往下推）', () => {
+    expect(
+      planViewport({ ...silent, orderChanged: false, appended: false, pinned: true }),
+    ).toBe('jump-bottom');
+  });
+
+  it('行序没动、只有行高回填，但用户在中间 → 钉锚点，不能把他拽到底部', () => {
+    expect(
+      planViewport({ ...silent, orderChanged: false, appended: false, pinned: false }),
+    ).toBe('pin');
   });
 });

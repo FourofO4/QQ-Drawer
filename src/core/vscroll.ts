@@ -121,6 +121,17 @@ export interface Anchor {
   inner: number;
 }
 
+/**
+ * 用消息 id 表达的锚点。
+ *
+ * 翻页会让所有下标整体后移，下标在新行序里对不上；`message_id` 不会。所以跨
+ * 坐标系搬运视口位置时一律用这个形式。
+ */
+export interface AnchorKey {
+  key: string;
+  inner: number;
+}
+
 /** 由 scrollTop 取锚点。越界一律夹到合法范围，不抛错 */
 export function anchorAt(offsets: readonly number[], scrollTop: number): Anchor {
   const total = offsets.length - 1;
@@ -149,7 +160,7 @@ export function anchorKeyAt(
   offsets: readonly number[],
   keys: readonly string[],
   scrollTop: number,
-): { key: string; inner: number } | null {
+): AnchorKey | null {
   if (offsets.length !== keys.length + 1) return null;
   const a = anchorAt(offsets, scrollTop);
   const key = keys[a.index];
@@ -193,4 +204,80 @@ export function isAppendOnly(
  */
 export function shouldLoadMore(scrollTop: number, threshold = 48): boolean {
   return scrollTop <= threshold;
+}
+
+/**
+ * 把渲染窗口里**同步量到**的真实行高合并进高度表。
+ *
+ * 为什么要有同步测量这一步：`offsets` 是算视口位置的坐标系，而 DOM 里的真实高度
+ * 只有 `offsetHeight` 说了算。只要还有「已渲染但没测量」的行，`offsets` 与真实布局
+ * 就对不上 —— 这时用 `offsets` 反算出来的锚点位置本身就是错的，补完还是歪的。
+ * 翻页插入一页新行时最明显：那批行全是估值（比如 44px），真实行高可能是 60px，
+ * 三十行差 480px，于是「先错一帧、等 ResizeObserver 回填再跳回来」——用户看到的就是闪。
+ * 同步读一遍 `offsetHeight` 会让浏览器立刻 layout 并把真实高度交出来，这个偏差当场消失。
+ *
+ * 返回值里 `changed` 很关键：**没变就必须原样返回旧对象**。每写一次高度信号就是一轮
+ * 渲染 + 一轮视口校正，白白触发就是白白抖动。
+ */
+export function mergeMeasured(
+  heights: Readonly<Record<string, number>>,
+  measured: readonly { key: string; height: number }[],
+): { heights: Record<string, number>; changed: boolean } {
+  let next: Record<string, number> | null = null;
+  for (const { key, height } of measured) {
+    // 行还没进布局（`display:none`、被移除）时会量到 0，这种样本必须丢掉：
+    // 收下来会把这一行的高度记成 0，坐标系出现一个洞。
+    if (key === '' || !Number.isFinite(height) || height <= 0) continue;
+    const cur = next === null ? heights[key] : next[key];
+    if (cur === height) continue;
+    if (next === null) next = { ...heights };
+    next[key] = height;
+  }
+  return next === null ? { heights: heights as Record<string, number>, changed: false } : { heights: next, changed: true };
+}
+
+/** 坐标系换代后视口该怎么走 */
+export type ViewportAction =
+  /** 跳到底部：换会话、或用户本来就贴着底、又来了新消息 */
+  | 'jump-bottom'
+  /** 钉住锚点：把「用户正看着的那一行」放回视口里原来的位置 */
+  | 'pin'
+  /** 什么都不做：行序与行高都没变，此刻的 `scrollTop` 就是用户的意图 */
+  | 'hold';
+
+/**
+ * 决定视口动作。这是 bug 3 里最容易写错的一处判定，所以单独抽出来钉住。
+ *
+ * 三条判据的由来：
+ * - **`coordChanged` 为假就 `hold`**。用户的滚动也会被响应式系统看到，但它不改行序、
+ *   也不改行高 —— 坐标系没换代时去「校正」视口，就是把用户刚滚出来的位置又拽回去。
+ * - **贴底跟随只认「向下追加」**。翻页是往前面插历史，首行换了人；这时跟到底部，
+ *   就是「往上翻一页被弹回底部」的鬼打墙。所以翻页（`paging`）期间一律 `pin`。
+ * - **`paging` 期间用户可能已经滚到别处**，`pin` 用的是他此刻的位置，不是翻页前那个。
+ * - **行序没动、只有行高变了**（图片解码完、字体换行算准了）也要跟：贴底时那是新内容
+ *   把底部往下推，不跟的话用户就停在半截。所以只有**行序变化**才需要分追加与前插。
+ */
+export function planViewport(o: {
+  /** 行序整个换了一批（换会话） */
+  peerChanged: boolean;
+  /** 首屏还没定位过 */
+  jumpPending: boolean;
+  /** `offsets` 或行序变了 —— 坐标系换代 */
+  coordChanged: boolean;
+  /** 行序本身变了（前插会让首行换人） */
+  orderChanged: boolean;
+  /** 行序是「首行不动、尾部变长」的向下追加 */
+  appended: boolean;
+  /** 用户此刻贴着底部 */
+  pinned: boolean;
+  /** 正在向上翻页 */
+  paging: boolean;
+}): ViewportAction {
+  if (o.peerChanged || o.jumpPending) return 'jump-bottom';
+  if (!o.coordChanged) return 'hold';
+  // 没贴底就是在看历史，一律钉住；翻页期间更不许跟（哪怕此刻恰好贴在底部）
+  if (!o.pinned || o.paging) return 'pin';
+  // 贴底且没在翻页：只有「往前面插了东西」才不能跟
+  if (!o.orderChanged || o.appended) return 'jump-bottom';
+  return 'pin';
 }
