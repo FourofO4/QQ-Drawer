@@ -164,7 +164,66 @@ function msg(
 const group = { peer_type: 1 as const, peer_id: 30001 };
 const priv = { peer_type: 0 as const, peer_id: 20001 };
 
+/**
+ * 造一段**可信的历史**，用来验证虚拟滚动与向上翻页。
+ *
+ * 三条要求，缺一条就测不出真问题：
+ * 1. **条数够多**——一页 30 条，得能翻好几页才到顶；
+ * 2. **行高有真实的异质性**——短句 ~40px、多行长文 ~100px、图片 ~184px。
+ *    只造一种行高的话，"未渲染行用估值"的系统性偏差永远暴露不出来；
+ * 3. **时间跨度跨天**——这样日期分隔条会反复进出，顺带压一压"提示条不能占布局高度"。
+ */
+function seedHistory(
+  peer: { peer_type: 0 | 1; peer_id: number },
+  peerName: string,
+  count: number,
+  firstSeq: number,
+  newestMin: number,
+  oldestMin: number,
+): MessageDTO[] {
+  const speakers: [number, string][] =
+    peer.peer_type === 1
+      ? [
+          [30011, '李工'],
+          [30012, '小陈'],
+          [30013, '王姐'],
+          [30014, '大林'],
+          [SELF_ID, '我'],
+        ]
+      : [
+          [peer.peer_id, peerName],
+          [SELF_ID, '我'],
+        ];
+
+  const short = ['收到', '好', '我看看', '这个我改一下', '等会儿同步给你', 'OK', '已经推上去了'];
+  const long = [
+    '我把这轮的结论整理一下：接口字段名以文档里的为准，错误码表这周内冻结，联调环境明天上午十点开放，大家有问题直接在群里说。',
+    '关于性能这块补充两句——首屏渲染不能超过 200ms，列表要虚拟化，图片必须懒加载，不然内存压不住。这几个是硬指标，验收会照着测。',
+    '刚才那个问题定位到了，是缓存过期时间算错了一天，已经修了，这版本会用新的逻辑重新跑一遍回归。',
+  ];
+
+  const out: MessageDTO[] = [];
+  for (let i = 0; i < count; i += 1) {
+    const [senderId, senderName] = speakers[i % speakers.length]!;
+    // 从旧到新：i = 0 最旧（oldestMin 前），i = count-1 最新（newestMin 前）
+    const minutesAgo =
+      count === 1
+        ? newestMin
+        : newestMin + ((oldestMin - newestMin) * (count - 1 - i)) / (count - 1);
+    const roll = (i * 7) % 10;
+    const segments: MessageDTO['segments'] =
+      roll === 3
+        ? [{ type: 'image', path: IMG, sub_type: 0, state: 1 }]
+        : roll === 6 || roll === 8
+          ? [{ type: 'text', text: long[i % long.length]! }]
+          : [{ type: 'text', text: `${i + 1}. ${short[i % short.length]!}` }];
+    out.push(msg(String(firstSeq + i), peer, minutesAgo, senderId, senderName, segments));
+  }
+  return out;
+}
+
 messages['1:30001'] = [
+  ...seedHistory(group, '大前端交流群', 300, 80000, 120, 6 * 24 * 60),
   msg('90001', group, 96, 30011, '李工', [{ type: 'text', text: '早，昨天的联调结论同步一下' }]),
   msg('90002', group, 92, 30011, '李工', [
     { type: 'text', text: '先看这个' },
@@ -199,6 +258,7 @@ messages['1:30001'] = [
 ];
 
 messages['0:20001'] = [
+  ...seedHistory(priv, '小陈', 120, 70000, 60, 2 * 24 * 60),
   msg('91001', priv, 24, 20001, '小陈', [{ type: 'text', text: '今天几点到？' }]),
   msg('91002', priv, 22, SELF_ID, '我', [{ type: 'text', text: '六点半落地' }]),
   msg('91003', priv, 6, 20001, '小陈', [{ type: 'text', text: '你到了跟我说一声，我下去接你' }]),
@@ -239,6 +299,8 @@ let settings: SettingsDTO = {
 
 let seq = 100000;
 let demoIndex = 0;
+/** 窗口形态的假权威值（真实实现里在 Rust 侧，见 `expand_window`） */
+let windowExpanded = false;
 
 const DEMO_INCOMING: [number, 0 | 1, string, string][] = [
   [20009, 0, '老王', '这个报错你帮我看下？'],
@@ -512,8 +574,14 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return undefined as T;
 
     case 'expand_window':
-    case 'collapse_window':
+    case 'collapse_window': {
+      // 形态的权威副本在 Rust；假后端至少得把它记下来，否则 `window_state` 永远回
+      // `expanded: false`，而 App 的启动自检会照着把面板收回去 —— 浏览器里就永远看不到面板。
+      const next = cmd === 'expand_window';
+      windowExpanded = next;
+      emit('window_state', { expanded: next, width: 264, height: next ? 620 : 40 });
       return undefined as T;
+    }
 
     // 真实实现里它会先抑制自动收起、再交给系统拖动；假后端只有窗口内的一层 DOM，
     // 没有可拖动的原生窗口，所以只需要不抛错
@@ -521,7 +589,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return undefined as T;
 
     case 'window_state':
-      return { expanded: false, width: 264, height: 40 } as T;
+      return { expanded: windowExpanded, width: 264, height: windowExpanded ? 620 : 40 } as T;
 
     case 'exit_app':
       emit('toast', { text: '（mock）这里不会真的退出', kind: 'info' });

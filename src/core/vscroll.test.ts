@@ -292,8 +292,15 @@ describe('坐标系换代后视口动作', () => {
     expect(planViewport({ ...silent, appended: true, pinned: false })).toBe('pin');
   });
 
-  it('翻页期间一律钉锚点，哪怕此刻贴着底（回归"往上翻一页被弹回底部"）', () => {
-    expect(planViewport({ ...silent, appended: true, pinned: true, paging: true })).toBe('pin');
+  it('翻页期间这个 effect 让路（补偿由翻页流程自己做，两边各补一次会打架）', () => {
+    expect(planViewport({ ...silent, appended: true, pinned: true, paging: true })).toBe('hold');
+    expect(planViewport({ ...silent, appended: false, pinned: false, paging: true })).toBe('hold');
+  });
+
+  it('翻页期间即使贴着底也不跟到底部（回归"往上翻一页被弹回底部"）', () => {
+    expect(
+      planViewport({ ...silent, orderChanged: false, appended: false, pinned: true, paging: true }),
+    ).not.toBe('jump-bottom');
   });
 
   it('向上翻页（首行换了人）不算追加 → 钉锚点，绝不跟到底部', () => {

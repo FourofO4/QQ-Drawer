@@ -197,20 +197,70 @@ export function MessageList() {
   };
 
   /**
-   * 坐标系刚换代：把视口钉回锚点。
+   * 用户此刻**正看着哪一行的第几像素**。
    *
-   * `anchor` 是换代**之前**取好的「用户正看着哪一行、看到该行的第几像素」。迭代的理由是
-   * 位置一动，渲染窗口可能换了一批行，而那批行还没量过 —— 量完坐标系才真正收敛。
+   * 这是整个视口逻辑里唯一跨坐标系稳定的量：行高回填、向上翻页，`offsets` 会整个换代，
+   * 同一个 `scrollTop` 指向别的内容；而"哪一行 + 行内偏移"始终说的是同一处内容。
+   * 所以位置的真值是它，`scrollTop` 只是它在当前坐标系下的投影。
    */
-  const settle = (el: HTMLDivElement, anchor: AnchorKey | null) => {
+  let anchor: AnchorKey | null = null;
+
+  /** 已经排了一次补偿微任务，同一批里后面的请求合并掉 */
+  let restoreQueued = false;
+
+  /**
+   * 取「视口顶边落在哪一行、行内偏移多少」。
+   *
+   * ⚠️ 必须与当前 `offsets` **同代**：`offsets` 一换代（行高回填、前插历史），
+   * 同一个 `scrollTop` 就指向别的内容了。所以只能在"没有测量与插入夹在中间"的
+   * 时刻调用——`onScroll` 里、以及 `restore` 刚写完位置时。
+   */
+  const captureAnchor = (el: HTMLDivElement): AnchorKey | null =>
+    anchorKeyAt(offsets(), rowKeys(), el.scrollTop);
+
+  /**
+   * 把视口搬回锚点。**唯一的补偿入口**。
+   *
+   * ## 为什么必须跑在微任务 / async 上下文里，而不能直接在 `createEffect` 里做
+   *
+   * `createEffect` 执行期间 Solid 的更新队列是锁住的：`setHeights` / `setScrollTop`
+   * 都不会立刻改 DOM。于是"测量 → 补偿 → 再测量"的迭代第二轮量到的还是同一批 DOM，
+   * 等于没迭代。微任务里 `ExecCount` 已经归零，写信号会同步推进 DOM，迭代才真收敛。
+   *
+   * ## 迭代为什么必要
+   *
+   * 锚点行**前面**可能夹着从没渲染过、只有估值的行。翻页插进来一页（30 条），视口
+   * 只盖得住其中一部分，剩下的按估值算——而估值与真实行高能差一倍（短句 vs 图片行），
+   * 这一页的锚点位置就整体偏出去。实测：`scrollTop` 需要 3021px 却走了 3283px，
+   * 视口停在别的消息上（"衔接不准"）。
+   *
+   * 每轮补偿都会把新的一批行拉进渲染窗口（`applyTop` 改位置 → `range` 换批 → DOM 更新），
+   * 下一轮它们就是实测值了。两轮就能把锚点行前面的行全部测到。
+   */
+  const restore = (el: HTMLDivElement) => {
+    const a = anchor;
+    if (a === null) return;
     for (let pass = 0; pass < MAX_SETTLE_PASSES; pass += 1) {
       const measured = measureRendered(el);
-      if (anchor !== null) {
-        const top = topForKey(offsets(), rowKeys(), anchor.key, anchor.inner);
-        if (top !== null) applyTop(el, top);
-      }
-      if (!measured) return;
+      const top = topForKey(offsets(), rowKeys(), a.key, a.inner);
+      if (top !== null) applyTop(el, top);
+      if (!measured) break;
     }
+    // 落点已定，把锚点重新对齐到**实际**位置，下次换代拿它当基准才是准的
+    anchor = captureAnchor(el);
+  };
+
+  /**
+   * 排一次补偿。合并同一批里的重复请求——`offsets` 换代常常连着好几次
+   * （测量、回填各来一轮），每轮都单独补一次会互相打架。
+   */
+  const scheduleRestore = () => {
+    if (restoreQueued) return;
+    restoreQueued = true;
+    queueMicrotask(() => {
+      restoreQueued = false;
+      if (scroller !== undefined) restore(scroller);
+    });
   };
 
   const handleResize = (entries: ResizeObserverEntry[]) => {
@@ -252,8 +302,9 @@ export function MessageList() {
   /* --------------------- 视口跟随（唯一的判定入口） --------------------- */
 
   let lastPeer: string | null = null;
-  let lastKeys: string[] = [];
-  let lastOffsets: number[] = [];
+  /** 上一轮的坐标系（行序 + 高度表），用来判定「换代」 */
+  let lastKeys: string[] | null = null;
+  let lastOffsets: number[] | null = null;
   /** 刚换过会话、还没跳过底 */
   let jumpPending = false;
 
@@ -261,9 +312,11 @@ export function MessageList() {
    * 所有「坐标系换代」都从这里过：换会话、行高回填、向上翻页插入历史。
    *
    * 判定本身在 `core/vscroll.ts` 的 `planViewport`（有单测），这里只负责执行。
-   * 注意坐标系是否换代用的是**引用比较**：`offsets` / `rowKeys` 都是 memo，没变就
-   * 返回同一个数组。用户滚动只改 `scrollTop`、不改这两个引用 —— 所以"用户滚了一下"
-   * 不会被误判成换代、也就不会被"校正"回原处。
+   *
+   * ⚠️ 这个 effect **刻意不读 `scrollTop`**。读它的话，用户每滚一下 effect 就重跑一次，
+   * 而重跑时会重新走一遍"要不要校正视口"的判定 —— 视口校正和用户的滚动就会互相打架
+   * （bug 3 的滚轮失灵、卡在中间都源于此）。用户滚动只需要更新锚点，那件事在 `onScroll`
+   * 里做，不必惊动这个 effect。
    */
   createEffect(() => {
     // `scroller` 是普通变量，没有响应性。首屏那一轮 effect 跑在 JSX 之前，那时它还是
@@ -273,15 +326,17 @@ export function MessageList() {
     const peer = S.state.current;
     const keys = rowKeys();
     const offs = offsets();
-    const top = scrollTop();
     const el = scroller;
     if (el === undefined) return;
 
     const peerChanged = peer !== lastPeer;
-    // 换会话时旧行序对新会话毫无意义，锚点必须作废，否则会在两批不相干的消息之间搬位置
-    const prevKeys = peerChanged ? [] : lastKeys;
-    const prevOffsets = peerChanged ? [] : lastOffsets;
-    const coordChanged = peerChanged || offs !== prevOffsets || keys !== prevKeys;
+    const prevKeys = lastKeys;
+    const prevOffsets = lastOffsets;
+    // 坐标系是否换代用**引用比较**：`offsets` / `rowKeys` 都是 memo，没变就返回同一个
+    // 数组。用户滚动只改 `scrollTop`、不动这两个引用 —— 所以"用户滚了一下"不会被误判
+    // 成换代、也就不会被"校正"回原处。
+    const coordChanged =
+      peerChanged || prevOffsets === null || offs !== prevOffsets || keys !== prevKeys;
 
     if (peerChanged) {
       lastPeer = peer;
@@ -293,6 +348,7 @@ export function MessageList() {
       setHeights({});
       setEstimate(ESTIMATED_ROW_HEIGHT);
       expectTop = null; // 上个会话的补偿记录对新会话没有意义
+      anchor = null; // 旧锚点指向旧会话的行，留着会在两批不相干的消息之间搬位置
     }
 
     lastKeys = keys;
@@ -304,14 +360,14 @@ export function MessageList() {
     // 图片解码完）会让 `rowKeys` 换一个新数组，但行还是那几行 —— 那种情况按「行高变了」
     // 处理即可，别误判成"往前面插了东西"。
     const orderChanged =
-      keys.length !== prevKeys.length || keys[0] !== prevKeys[0];
+      prevKeys === null || keys.length !== prevKeys.length || keys[0] !== prevKeys[0];
 
     const action = planViewport({
       peerChanged,
       jumpPending,
       coordChanged,
       orderChanged,
-      appended: orderChanged && isAppendOnly(prevKeys, keys),
+      appended: orderChanged && isAppendOnly(prevKeys ?? [], keys),
       pinned: pinned(),
       paging,
     });
@@ -321,11 +377,14 @@ export function MessageList() {
 
     if (action === 'jump-bottom') {
       // 此刻图片多半还没解码，撑高之后坐标系会再变一轮，那一轮继续跟
+      anchor = null;
       applyTop(el, el.scrollHeight);
+      anchor = captureAnchor(el);
       return;
     }
 
-    settle(el, prevKeys.length === 0 ? null : anchorKeyAt(prevOffsets, prevKeys, top));
+    // 钉锚点交给微任务去做 —— 只有在那个上下文里，测量与补偿才能同步迭代（见 `restore`）
+    scheduleRestore();
   });
 
   /* ------------------------------ 滚动与翻页 ------------------------------ */
@@ -345,6 +404,9 @@ export function MessageList() {
     if (mine) return;
 
     setPinned(v + el.clientHeight >= el.scrollHeight - PINNED_SLACK);
+    // 用户滚到哪，锚点就跟到哪 —— 这是"用户在看哪一行"的唯一来源。此刻没有测量或
+    // 插入夹在中间，`offsets` 与 `scrollTop` 同代，取出来的位置是准的。
+    anchor = captureAnchor(el);
     // 翻页等待期间不再重复触发翻页，但**贴底态照常重算**：用户在这几十~几百毫秒里
     // 又滚回底部时，贴底跟随必须能恢复，否则他会觉得"到底了也不跟新消息"。
     if (!paging && shouldLoadMore(v)) void paginateUp();
@@ -353,26 +415,38 @@ export function MessageList() {
   /**
    * 向上翻页（FR-20）。
    *
-   * 位置的补偿不在这里做 —— 插入完 `rows` 一变，上面那个统一入口就会用「翻页前
-   * 用户看的那一行」把视口钉回去。这里只负责"别再重复发请求"这一个闸。
+   * 补偿**在这里做**，而不是交给上面那个统一入口，原因只有一个：`createEffect` 里
+   * Solid 的更新队列是锁住的，"测量 → 补偿 → 再测量"的迭代第二轮量到的还是同一批 DOM，
+   * 等于没迭代。而 `loadOlder` 的 `setState` 跑在 async 上下文里，它一返回 DOM 就已经
+   * 换成新行序了 —— 正好可以同步迭代地把视口钉回锚点（见 `restore`）。
    */
   const paginateUp = async () => {
-    if (scroller === undefined || paging) return;
+    const el = scroller;
+    if (el === undefined || paging) return;
     paging = true;
     setPinned(false); // 用户在看历史，明确退出贴底
+    // 锚点必须在**翻页前**取。等 `loadOlder` 返回再取就晚了：那时行序与高度表都已换代，
+    // 用新坐标系去解释旧的 `scrollTop`，取到的是另一行 —— 视口就是这么漂走的。
+    const before = captureAnchor(el);
     try {
       await loadOlder();
+      if (before !== null) {
+        anchor = before;
+        restore(el);
+      }
     } finally {
       paging = false;
     }
   };
 
   const jumpTo = (messageId: string) => {
-    const el = scroller?.querySelector<HTMLElement>(`[data-mid="${messageId}"]`);
-    if (el && scroller) {
-      el.scrollIntoView({ block: 'center' });
+    const target = scroller?.querySelector<HTMLElement>(`[data-mid="${messageId}"]`);
+    if (target && scroller) {
+      target.scrollIntoView({ block: 'center' });
       setScrollTop(scroller.scrollTop);
-      el.animate?.(
+      // 跳转也是一次"用户意图"，锚点必须跟着走，否则之后的行高回填会把他拽回原处
+      anchor = captureAnchor(scroller);
+      target.animate?.(
         [
           { outline: '1px solid rgba(239,159,39,.9)' },
           { outline: '1px solid rgba(239,159,39,0)' },

@@ -275,9 +275,15 @@ export function planViewport(o: {
 }): ViewportAction {
   if (o.peerChanged || o.jumpPending) return 'jump-bottom';
   if (!o.coordChanged) return 'hold';
-  // 没贴底就是在看历史，一律钉住；翻页期间更不许跟（哪怕此刻恰好贴在底部）
-  if (!o.pinned || o.paging) return 'pin';
-  // 贴底且没在翻页：只有「往前面插了东西」才不能跟
+  // 翻页期间这个 effect 让路：位置的补偿由翻页流程自己做（`ui/MessageList.tsx` 的
+  // `paginateUp`）。它既持有跨 await 取好的锚点，又跑在 async 上下文里 ——
+  // 那里写信号能同步推进 DOM，测量/补偿的迭代才真的收敛；而 effect 执行期间
+  // Solid 的更新队列是锁的，迭代第二轮量到的还是同一批 DOM，补出来的位置是偏的。
+  if (o.paging) return 'hold';
+  // 没贴底就是在看历史，钉住别动。翻页已经在上一条让开了，这里的 `pinned` 是
+  // "用户真的停在底部"的那一次判定。
+  if (!o.pinned) return 'pin';
+  // 贴底：只有「往前面插了东西」才不能跟（那种情况首行会换人，见 `isAppendOnly`）
   if (!o.orderChanged || o.appended) return 'jump-bottom';
   return 'pin';
 }
