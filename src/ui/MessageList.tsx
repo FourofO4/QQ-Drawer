@@ -68,6 +68,11 @@ const OBSERVE_PRUNE_AT = 200;
  * 真实布局下两轮就收敛，给三轮是留余量，免得病态布局下无限打转。
  */
 const MAX_SETTLE_PASSES = 3;
+/**
+ * 「铺满渲染窗口」一次最多渲染多少行（见 `view` 的 `wide` 分支）。
+ * 前插一页只有 30 行，正常场景远用不到这个数。
+ */
+const WIDE_MAX_ROWS = 80;
 
 export function MessageList() {
   let scroller: HTMLDivElement | undefined;
@@ -113,7 +118,10 @@ export function MessageList() {
   const [wide, setWide] = createSignal(false);
   const view = createMemo(() => {
     const w = win();
-    return wide() ? { start: 0, end: w.end } : w;
+    // 铺满时给个上限：正常场景（视口就在列表顶端附近）`w.end` 本来就远小于它，
+    // 上限只用来兜住"翻页期间用户又滚走了"这种极端情况 —— 那时 `w.start` 很大，
+    // 铺满会一次渲染几百行。
+    return wide() ? { start: 0, end: Math.min(w.end, WIDE_MAX_ROWS) } : w;
   });
   const range = createMemo<Row[]>(() => rows().slice(view().start, view().end));
   const padTop = createMemo(() => offsets()[view().start] ?? 0);
