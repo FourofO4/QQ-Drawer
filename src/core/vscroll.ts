@@ -1,8 +1,17 @@
 /**
  * 虚拟滚动数学（NFR-05 / 优化清单 #1）。
  *
- * 只渲染可视区 ±overscan 行；累计高度表定位；翻页插入历史时靠 anchorShift 保持视口稳定。
+ * 只渲染可视区 ±overscan 行；累计高度表定位；视口位置用**锚点**保持不变。
  * 这里刻意不碰 DOM——DOM 测量在 MessageList 里做，本模块只负责算下标。
+ *
+ * ## 为什么必须有锚点
+ *
+ * `scrollTop` 是个绝对像素值，但它所在的内容坐标系（`offsets`）会变：
+ * 行高从估值换成实测、向上翻页插入历史，都会改写 `offsets`。坐标系一变，
+ * 同一个 `scrollTop` 就指向别的内容了 —— 用户看到的就是"消息自己往回退"。
+ *
+ * 真正稳定的量不是 `scrollTop`，而是**用户正看着哪一行、看到该行的第几像素**。
+ * 把这个叫锚点，坐标系换代后由锚点反算新的 `scrollTop`，视口就一像素都不动。
  */
 
 export interface Range {
@@ -16,8 +25,11 @@ export interface Range {
   padBottom: number;
 }
 
-/** 行高未知时的估值，第一帧用它兜底，测量后逐行替换 */
+/** 行高未知时的初始估值。测量样本攒够之后由 `estimateRowHeight` 接手 */
 export const ESTIMATED_ROW_HEIGHT = 44;
+
+/** 自适应估值至少要有这么多测量样本才敢用（样本太少中位数没意义） */
+export const ESTIMATE_SAMPLE_MIN = 5;
 
 /**
  * 累计偏移表：offsets[i] = 第 i 行的顶部坐标，长度 = heights.length + 1。
@@ -32,6 +44,29 @@ export function buildOffsets(heights: readonly number[]): number[] {
   }
   offsets[heights.length] = acc;
   return offsets;
+}
+
+/**
+ * 未测量行的估值：取已测行高的**中位数**。
+ *
+ * 为什么不能一直用固定的 44：`padTop` / `padBottom` 是"没渲染出来的部分"的
+ * 占位高度，按估值算；而渲染出来的行是**真实**高度。渲染窗口每往下滑一行，
+ * 就有一行的高度从"估值"换成"真实值"。估值偏得越多，这个换算就越不平，
+ * `scrollHeight` 随之抖动 —— 滚动条抽风就是这么来的。
+ *
+ * 取中位数而不是均值：图片行动辄两三百像素，均值会被它整体拉偏，
+ * 中位数对离群值免疫，误差能压到几像素。
+ */
+export function estimateRowHeight(
+  measured: readonly number[],
+  fallback = ESTIMATED_ROW_HEIGHT,
+): number {
+  const xs = measured.filter((h) => Number.isFinite(h) && h > 0);
+  if (xs.length < ESTIMATE_SAMPLE_MIN) return fallback;
+  xs.sort((a, b) => a - b);
+  const mid = xs.length >> 1;
+  const median = xs.length % 2 === 1 ? xs[mid]! : (xs[mid - 1]! + xs[mid]!) / 2;
+  return Math.round(median);
 }
 
 /** 二分找出第一个 top + height > y 的行下标 */
@@ -72,13 +107,78 @@ export function computeRange(
   return { start, end, padTop, padBottom: Math.max(0, padBottom) };
 }
 
+/** 视口锚点：钉住「哪一行、该行顶边往下多少像素」 */
+export interface Anchor {
+  /** 行下标（offsets 的坐标系） */
+  index: number;
+  /** 视口顶边相对该行顶边的偏移，恒 ≥ 0 */
+  inner: number;
+}
+
+/** 由 scrollTop 取锚点。越界一律夹到合法范围，不抛错 */
+export function anchorAt(offsets: readonly number[], scrollTop: number): Anchor {
+  const total = offsets.length - 1;
+  if (total <= 0) return { index: 0, inner: 0 };
+  const y = Math.max(0, scrollTop);
+  const index = indexAt(offsets, y);
+  const top = offsets[index] ?? 0;
+  return { index, inner: Math.max(0, y - top) };
+}
+
+/** 由锚点反算 scrollTop */
+export function anchorTop(offsets: readonly number[], a: Anchor): number {
+  const total = offsets.length - 1;
+  if (total <= 0) return 0;
+  const index = Math.max(0, Math.min(a.index, total - 1));
+  return Math.max(0, (offsets[index] ?? 0) + a.inner);
+}
+
 /**
- * 向上插入历史后，把滚动位置顶回去，使视口内容不跳。
- * @param anchorIndex 插入前视口顶部那一行的下标
- * @param insertedHeight 新插入内容的总高度
+ * 取视口当前锚在**哪一行的 key** 上、行内偏移多少。
+ *
+ * 用 key 而不是下标：向上翻页会让所有下标整体后移，下标在新行序里对不上，
+ * 而 message_id 是稳定的。行序为空时返回 null。
  */
-export function anchorShift(insertedHeight: number, prevScrollTop: number): number {
-  return Math.max(0, prevScrollTop + insertedHeight);
+export function anchorKeyAt(
+  offsets: readonly number[],
+  keys: readonly string[],
+  scrollTop: number,
+): { key: string; inner: number } | null {
+  if (offsets.length !== keys.length + 1) return null;
+  const a = anchorAt(offsets, scrollTop);
+  const key = keys[a.index];
+  return key === undefined ? null : { key, inner: a.inner };
+}
+
+/**
+ * 由「锚点行的 key + 行内偏移」反算 scrollTop。
+ * 该 key 在新行序里找不到时返回 null，交给调用方决定怎么兜底。
+ */
+export function topForKey(
+  offsets: readonly number[],
+  keys: readonly string[],
+  key: string,
+  inner: number,
+): number | null {
+  if (offsets.length !== keys.length + 1) return null;
+  const index = keys.indexOf(key);
+  if (index < 0) return null;
+  return anchorTop(offsets, { index, inner });
+}
+
+/**
+ * 本次行序变化是不是「向下追加」（新消息进列表）。
+ *
+ * 只有这种情况才该把视口跟到底部。向上翻页插入历史时首行会变，判为 false ——
+ * 若在这里跟到底部，就会出现「用户往上翻历史，翻一页被弹回底部」的鬼打墙。
+ */
+export function isAppendOnly(
+  before: readonly string[],
+  after: readonly string[],
+): boolean {
+  if (before.length === 0 || after.length <= before.length) return false;
+  // 首行换了人 → 前面插了东西（翻页），不是追加
+  return before[0] === after[0];
 }
 
 /**

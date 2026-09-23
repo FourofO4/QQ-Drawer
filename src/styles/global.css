@@ -346,13 +346,16 @@ button {
 
 /* ---- 消息区 ---- */
 .msgs {
+  position: relative; /* 提示条是浮层，相对这里定位（见底部 .top-hint） */
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
   padding: 12px 14px 6px;
   display: flex;
   flex-direction: column;
-  gap: 9px;
+  /* 行间距**不能**用这里的 gap：gap 不计入 offsetHeight，量出来的行高会少一个
+     间距，30 行就是 261px 的系统性偏差 —— 虚拟滚动的坐标系跟真实布局对不上，
+     滚动条就会抽。间距做在 .row-wrap 的 padding 上。 */
   scrollbar-gutter: stable;
 }
 
@@ -360,12 +363,15 @@ button {
   flex: none;
 }
 
-/* 虚拟滚动的测量单元：分隔与消息在同一个 wrapper 里，行高才量得准 */
+/* 虚拟滚动的测量单元：分隔与消息在同一个 wrapper 里，行高才量得准。
+   行间距（9px）做在 padding 上而不是父级的 flex gap —— 这样 offsetHeight
+   就是这一行**真实占用的高度**，offsets 与 DOM 布局严格一致。 */
 .row-wrap {
   display: flex;
   flex-direction: column;
   min-height: 0;
   flex: none;
+  padding-bottom: 9px;
 }
 
 .day {
@@ -577,11 +583,31 @@ button {
 .empty-hint,
 .top-hint,
 .loading-hint {
-  align-self: center;
   font-size: var(--fs-meta);
   color: var(--t4);
   padding: 6px 0;
   flex: none;
+}
+
+.empty-hint {
+  align-self: center;
+}
+
+/* 「以上是全部」「正在加载更早的消息」是浮在列表上的提示，**不能占布局高度**：
+   它们进进出出会改变 scrollHeight，而它们不在行高测量的观察范围内，没有谁会替
+   视口补回这个偏移 —— 二十几像素的抖动，用户看得见（bug 3）。 */
+.top-hint,
+.loading-hint {
+  position: absolute;
+  top: 4px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: var(--overflow-bg);
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 1;
 }
 
 /* ---- 输入区 ---- */
