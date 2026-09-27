@@ -343,7 +343,20 @@ npm run tauri build -- --bundles nsis
 | `R:\QQ-Drawer\QQ-Drawer-Setup.exe` | NSIS 安装包（跑 `build.ps1` 才生成）。**当前用户**安装，开始菜单里有快捷方式 |
 
 **release 构建很慢**（fat LTO + `opt-level="z"`，首次约 25~30 分钟，且 MinGW ld 链接是瓶颈）。
-`%TEMP%\qq-drawer-target` 里的依赖是缓存复用的，别随手删。
+`%TEMP%\qq-drawer-target` 里的依赖是缓存复用的，别随手删。日常只改前端时加 `--no-bundle`
+跳过 NSIS 打包，约 3 分半。
+
+> ⚠️ **`R:\QQ-Drawer\QQ-Drawer.exe` 是构建产物的一份拷贝，不是符号链接。**
+> 改了前端（任何 `src/**` 里的代码，包括 `.tsx` 样式）之后**必须重跑一次构建并重新拷贝**，
+> 否则双击 `Start QQ Drawer.bat` 拉起的还是上一次那份 exe —— 界面上看到的是旧代码，
+> 很容易被误判成"修复无效"。判据是 exe 的修改时间：
+> ```bash
+> ls -la "R:/QQ-Drawer/QQ-Drawer.exe"   # 应晚于你最后一次改动 src/
+> ```
+> 只想快速拿到便携版可以只跑
+> `npm run tauri build -- --no-bundle`，再把
+> `%TEMP%\qq-drawer-target\release\qq-drawer.exe` 拷成 `R:\QQ-Drawer\QQ-Drawer.exe`。
+> 另外 exe 正在运行时会占用文件，拷贝会失败——先退出抽屉（托盘图标右键退出）。
 
 ### 4.1 日常启动：双击一个文件就够了
 
