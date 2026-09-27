@@ -221,7 +221,7 @@ export function MessageList() {
   /**
    * 首屏拿到第一批样本就把估值钉死（约束 ①）。
    *
-   * 取样只取**当前列表**里的行：`heights` 里可能还留着上个会话的 key，拿它们算中位数
+   * 取样只取**当前列表**里的行：`heights` 里可能还留着上个会话的 key，混进来算均值
    * 会让这批样本失真。
    */
   const learnEstimate = (h: Record<string, number>) => {
