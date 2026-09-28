@@ -205,6 +205,70 @@ button {
   animation: panel-out var(--dur-collapse) ease forwards;
 }
 
+/* ============================================================
+   面板尺寸把手（优化 2）
+   —— 只有右 / 下两侧：左、上的把手会移动窗口原点，
+      而"锚点 = 折叠条左上角"是 §3.4 关键规则 1。
+   —— z-index 4 高于内容层(1~3)、低于设置覆盖层(40)：
+      覆盖层铺满面板时把手让位，尺寸改由设置页的滑块负责。
+   ============================================================ */
+.grip {
+  position: absolute;
+  z-index: 4;
+  /* 指针事件不被浏览器手势（滚动、选中）抢走 */
+  touch-action: none;
+}
+
+.grip-r {
+  top: 10px;
+  right: 0;
+  bottom: 10px;
+  width: 6px;
+  cursor: ew-resize;
+}
+
+.grip-b {
+  left: 10px;
+  right: 10px;
+  bottom: 0;
+  height: 6px;
+  cursor: ns-resize;
+}
+
+.grip-br {
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+}
+
+/* 右下角一个极淡的角标，悬停面板才显形（§3.2 的克制基调：没有多余的图标） */
+.grip-br::after {
+  content: '';
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid var(--t3);
+  border-bottom: 1.5px solid var(--t3);
+  border-bottom-right-radius: 3px;
+  opacity: 0;
+  /* 字面量即可：`data-motion='off'` 那条全局规则会把所有 transition 压到 0 */
+  transition: opacity 120ms ease;
+}
+
+.panel:hover .grip-br::after {
+  opacity: 0.5;
+}
+
+/* 拖拽期间禁掉选中：否则横向拖动会拖出一整片文字高亮。
+   光标不用管 —— 窗口跟着指针走，把手始终在指针底下。 */
+body.resizing {
+  user-select: none;
+}
+
 .tabs {
   display: flex;
   align-items: center;

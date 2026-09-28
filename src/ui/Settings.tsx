@@ -5,7 +5,7 @@
  * 这个程序的设置项都很轻，改完即生效比维护脏状态省事。
  */
 
-import { For, Show, createSignal } from 'solid-js';
+import { For, Show, createSignal, onMount } from 'solid-js';
 import * as S from '../state/store';
 import * as ipc from '../state/ipc';
 import { PANEL_PRESETS } from '../core/theme';
@@ -16,6 +16,21 @@ type Key = keyof SettingsDTO;
 export function Settings() {
   const st = () => S.state.settings;
   const [confirmReset, setConfirmReset] = createSignal(false);
+  /**
+   * 面板尺寸的合法区间，由 Rust 按当前显示器的工作区算出来。
+   *
+   * 前端算不出这个上限（`screen.availWidth` 是 CSS 像素，而窗口尺寸是物理像素，
+   * 两者在高 DPI 屏上差一个 devicePixelRatio），所以只能问 Rust。
+   * 取回来之前用保守值顶着，Rust 那边落库时还会再夹一次。
+   */
+  const [bounds, setBounds] = createSignal<ipc.ResizeBounds | null>(null);
+
+  onMount(() => {
+    void ipc
+      .beginResize()
+      .then(setBounds)
+      .catch((e) => console.error('[抽屉] 取面板尺寸上下限失败', e));
+  });
 
   async function save(key: Key, value: unknown): Promise<void> {
     S.patchSettings({ [key]: value });
@@ -81,6 +96,30 @@ export function Settings() {
                     onInput={(e) => void save('bar_width', Number(e.currentTarget.value))}
                   />
                   <span class="v">{s().bar_width}</span>
+                </div>
+                <div class="field">
+                  <label>面板宽度</label>
+                  {/* 拖动右下角把手也能改这两个值（优化 2）；滑块是给"收起状态下想调"
+                      和"要精确到某个数"准备的 —— 覆盖层铺满面板时把手够不着 */}
+                  <input
+                    type="range"
+                    min={bounds()?.min_w ?? 360}
+                    max={bounds()?.max_w ?? 1200}
+                    value={s().panel_w}
+                    onInput={(e) => void save('panel_w', Number(e.currentTarget.value))}
+                  />
+                  <span class="v">{s().panel_w}</span>
+                </div>
+                <div class="field">
+                  <label>面板高度</label>
+                  <input
+                    type="range"
+                    min={bounds()?.min_h ?? 240}
+                    max={bounds()?.max_h ?? 1000}
+                    value={s().panel_h}
+                    onInput={(e) => void save('panel_h', Number(e.currentTarget.value))}
+                  />
+                  <span class="v">{s().panel_h}</span>
                 </div>
                 <label class="chk">
                   <input

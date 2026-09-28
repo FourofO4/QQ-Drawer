@@ -14,6 +14,7 @@ import { Overflow } from './Overflow';
 import { Composer } from './Composer';
 import { Settings } from './Settings';
 import { CacheManager } from './CacheManager';
+import { ResizeGrip } from './ResizeGrip';
 
 export function Panel() {
   /** 点面板其它区域收回溢出层（FR-12） */
@@ -62,6 +63,12 @@ export function Panel() {
       <Show when={S.state.sheet === 'cache'}>
         <CacheManager />
       </Show>
+
+      {/* 尺寸把手（优化 2）。只放右 / 下两侧：左、上的把手会移动窗口原点，
+          而"锚点 = 折叠条左上角、面板向右下增长"是 §3.4 关键规则 1。 */}
+      <ResizeGrip axis="w" class="grip-r" />
+      <ResizeGrip axis="h" class="grip-b" />
+      <ResizeGrip axis="both" class="grip-br" />
     </div>
   );
 }

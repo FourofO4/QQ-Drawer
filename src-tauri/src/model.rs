@@ -286,6 +286,21 @@ pub struct WindowStateDto {
     pub height: u32,
 }
 
+/// 开始拖拽面板把手时，向 Rust 要的一组约束。
+///
+/// 为什么不能在前端写死：上限取决于**当前显示器的工作区**，那是只有窗口层知道的事。
+/// 前端拿到之后只管按 delta 算尺寸并先夹一遍（为了手感连续），权威夹取仍在 Rust。
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct ResizeBoundsDto {
+    /// 当前生效的面板尺寸（拖拽起点）
+    pub w: u32,
+    pub h: u32,
+    pub min_w: u32,
+    pub min_h: u32,
+    pub max_w: u32,
+    pub max_h: u32,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ToastPayload {
     pub text: String,

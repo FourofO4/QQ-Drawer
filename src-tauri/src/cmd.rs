@@ -803,6 +803,11 @@ pub fn set_setting(
     key: String,
     value: Value,
 ) -> CmdResult<()> {
+    // 不可信输入先过一遍校验（本文件开头的约定 3）。面板尺寸尤其需要：
+    // 上限取决于当前显示器，前端算不出来，不夹的话库里会存下窗口实际达不到的值，
+    // 设置页显示 1600 而窗口只有 1366。
+    let value = sanitize_setting(&app, &key, value);
+
     state
         .db
         .tx(|c| settings_store::set(c, &key, &value))
@@ -814,6 +819,25 @@ pub fn set_setting(
 
     apply_setting_side_effects(&app, state.inner(), &key, &fresh);
     Ok(())
+}
+
+/// 落库前的校验 / 夹取。
+///
+/// 目前只有面板宽高需要 —— 它们的合法上限取决于当前显示器的工作区，
+/// 是前端无论如何算不出来的量。非数字（类型不对）一律原样放行，
+/// 让 `settings_store::set` 的 JSON 反序列化去拒绝，这里不重复做类型校验。
+fn sanitize_setting(app: &AppHandle, key: &str, value: Value) -> Value {
+    if key != "panel_w" && key != "panel_h" {
+        return value;
+    }
+    let Some(v) = value.as_i64() else { return value };
+    let ((min_w, min_h), (max_w, max_h)) = window::panel_size_limits(app);
+    let (lo, hi) = if key == "panel_w" {
+        (min_w, max_w)
+    } else {
+        (min_h, max_h)
+    };
+    Value::from(v.clamp(lo as i64, hi as i64))
 }
 
 /// 设置项落地后的即时副作用。
@@ -935,6 +959,78 @@ pub fn begin_drag(app: AppHandle, state: State<'_, Arc<AppState>>) -> CmdResult<
     window::begin_drag(&app, state.inner()).map_err(err)
 }
 
+/// 开始拖拽面板尺寸把手：把当前尺寸与上下限交给前端。
+///
+/// **没有副作用**。拖拽期间尺寸由 [`preview_panel_size`] 逐帧改，这里只负责回答
+/// "从哪开始、最多到哪" —— 上限取决于当前显示器的工作区，只有窗口层知道，前端写死不了。
+#[tauri::command]
+pub fn begin_resize(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> CmdResult<crate::model::ResizeBoundsDto> {
+    let (w, h) = window::panel_size_now(&app, state.inner());
+    let ((min_w, min_h), (max_w, max_h)) = window::panel_size_limits(&app);
+    Ok(crate::model::ResizeBoundsDto { w, h, min_w, min_h, max_w, max_h })
+}
+
+/// 拖拽过程中的逐帧尺寸。只动窗口，**不落库、不广播**。
+///
+/// 不落库是硬要求：拖一次是每秒几十次的写盘。广播也没必要 —— 形态没变，只有尺寸在动，
+/// 前端本来就知道自己要多大。
+#[tauri::command]
+pub fn preview_panel_size(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    w: u32,
+    h: u32,
+) -> CmdResult<()> {
+    window::preview_panel_size(&app, state.inner(), w, h);
+    Ok(())
+}
+
+/// 拖拽落地：夹一次 → 落库 → 套用。与设置页滑块走同一条落地路径
+/// （`apply_setting_side_effects` 的 `panel_w | panel_h` 分支）。
+#[tauri::command]
+pub fn end_resize(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    w: u32,
+    h: u32,
+) -> CmdResult<()> {
+    let (w, h) = window::clamp_panel_size_on_main(&app, (w, h));
+    write_settings(
+        &app,
+        state.inner(),
+        &[("panel_w", Value::from(w)), ("panel_h", Value::from(h))],
+    )
+}
+
+/// 一次写多个设置键，然后重读快照并派发一次副作用。
+///
+/// 抽出来是因为 [`end_resize`] 必须同时写 `panel_w` 与 `panel_h`：拆成两次
+/// `set_setting` 会触发两次 `set_size` + 两次广播，中间那一帧窗口是"新宽度 + 旧高度"，
+/// 看得见。副作用按**第一个键**派发 —— 同一次写入里的键属于同一件事。
+fn write_settings(app: &AppHandle, state: &Arc<AppState>, pairs: &[(&str, Value)]) -> CmdResult<()> {
+    state
+        .db
+        .tx(|c| {
+            for (k, v) in pairs {
+                settings_store::set(c, k, v)?;
+            }
+            Ok(())
+        })
+        .map_err(err)?;
+
+    // 重读而不是就地改字段：库里存了什么永远是唯一事实（与 set_setting 一致）
+    let fresh = state.db.with(settings_store::get_all).map_err(err)?;
+    *state.settings.write() = fresh.clone();
+
+    if let Some((key, _)) = pairs.first() {
+        apply_setting_side_effects(app, state, key, &fresh);
+    }
+    Ok(())
+}
+
 /// 问一次窗口形态的权威值。
 ///
 /// 前端在 bootstrap 时对齐一次，避免"窗口已经是展开尺寸、界面却还画着折叠条"
@@ -945,7 +1041,13 @@ pub fn window_state(
     state: State<'_, Arc<AppState>>,
 ) -> CmdResult<crate::model::WindowStateDto> {
     let expanded = state.inner().expanded.load(std::sync::atomic::Ordering::Relaxed);
-    let (width, height) = state.inner().size_for(expanded);
+    // 期望值要用**生效**尺寸（夹过工作区的），否则用户把面板拖到比屏幕还大时，
+    // 这条自检会一直报"expect 和 actual 不一致"，把真正的几何漂移淹没掉。
+    let (width, height) = if expanded {
+        window::panel_size_now(&app, state.inner())
+    } else {
+        state.inner().size_for(false)
+    };
     let actual = app
         .get_webview_window("main")
         .and_then(|w| w.outer_size().map_err(|e| e.to_string()).ok())

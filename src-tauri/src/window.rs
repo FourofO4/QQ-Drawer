@@ -394,14 +394,95 @@ pub fn on_bar_width_changed(app: &AppHandle, state: &Arc<AppState>) {
     persist_anchor(state, origin.0, origin.1);
 }
 
+/// 面板的落点基准：**锚点**（折叠条左上角），不是当前窗口位置。
+///
+/// 展开态的位置可能被上次的越界平移挪过，拿"当前位置"当基准会让面板越拖越往左上爬。
+/// 拖拽过程中我们从不落库锚点，所以 `settings.window_x/y` 在这里恒等于真正的折叠条位置。
+fn panel_origin(state: &Arc<AppState>, work: &WorkArea) -> (i32, i32) {
+    let settings = state.settings_snapshot();
+    match (settings.window_x, settings.window_y) {
+        (Some(x), Some(y)) => (x, y),
+        _ => default_position(work, state.size_for(false).0),
+    }
+}
+
+/// 按锚点摆好面板。返回实际落点。
+///
+/// 位置只做**最小必要平移**（`anchor`）：尺寸本身已经被 `clamp_panel_size` 收进工作区了，
+/// 正常情况下这里不会挪动。
+fn place_panel(
+    win: &WebviewWindow,
+    state: &Arc<AppState>,
+    work: &WorkArea,
+    size: (u32, u32),
+) -> (i32, i32) {
+    let pos = anchor(panel_origin(state, work), size, work);
+    apply_geometry(win, pos, size);
+    pos
+}
+
+/// 展开面板当前**生效**的尺寸（已按工作区夹过）。前端在开始拖拽前拿它当起点。
+pub fn panel_size_now(app: &AppHandle, state: &Arc<AppState>) -> (u32, u32) {
+    match app.get_webview_window("main") {
+        Some(win) => size_on(state, true, &work_area_of(&win)),
+        None => state.size_for(true),
+    }
+}
+
+/// 面板尺寸的上下限。上限取决于当前显示器，只有这里知道。
+///
+/// 窗口还没建出来时退回到一个"1920×1080 屏"的保守上限，而不是 0 或 `u32::MAX`：
+/// 前者会把设置项夹成下限（不可逆的数据损坏），后者会让设置页画出一个荒谬的滑块量程。
+/// 真到套用尺寸时（`size_on`）还会按实际工作区再夹一次。
+pub fn panel_size_limits(app: &AppHandle) -> ((u32, u32), (u32, u32)) {
+    let min = (PANEL_MIN_W, PANEL_MIN_H);
+    let max = match app.get_webview_window("main") {
+        Some(win) => clamp_panel_size((u32::MAX, u32::MAX), &work_area_of(&win)),
+        None => clamp_panel_size((u32::MAX, u32::MAX), &WorkArea::new(0, 0, 1920, 1080)),
+    };
+    (min, max)
+}
+
+/// 落库前按当前显示器夹一次面板尺寸。
+///
+/// 为什么要在**写库前**夹：库里存的是"用户想要的尺寸"，跨显示器复用。若把 3840 屏上拖出来的
+/// 1600 原样写进去，换到 1366 的笔记本上读出来就是越界值 —— 用的时候虽然还会夹回来，
+/// 但设置页会显示一个假数值，用户看着莫名其妙。
+pub fn clamp_panel_size_on_main(app: &AppHandle, size: (u32, u32)) -> (u32, u32) {
+    match app.get_webview_window("main") {
+        Some(win) => clamp_panel_size(size, &work_area_of(&win)),
+        None => size,
+    }
+}
+
+/// 拖拽把手过程中的逐帧尺寸：**只动窗口，不落库、不广播**。
+///
+/// ⚠️ 这里有意识地对 §3.4 关键规则 3（"绝不逐帧改窗口尺寸"）开了例外，理由是那条规则的
+/// 适用对象不同：它针对的是**动画**——应用自己按时间轴改尺寸，180ms 十来帧，而且同时在动
+/// 内容（opacity / translateY），两份开销叠加才会"必卡"。用户拖拽把手是**指针直接驱动**的，
+/// 与 Windows 自己的 resize 循环同性质，逐帧跟随才是 1:1 的手感；不跟手反而像是坏的。
+/// 代价是 DWM 每帧重算背景模糊 —— 注意**窗口恒等于面板**，所以模糊的色调矩形永远对得上，
+/// 视觉上不会出现"整屏糊一层"（那正是"先放大窗口再在 CSS 里缩预览"那条路会踩的坑）。
+/// 若实测卡顿，退化方案是"拖拽期间只跟尺寸数字、松手才 `set_size`"，
+/// 改动只在 `ui/ResizeGrip.tsx` 里 —— **别在这里加节流**，节流已经在 rAF 那层做过一次了。
+///
+/// **不落库是硬要求**：拖一次是 60 次/秒的写盘。
+pub fn preview_panel_size(app: &AppHandle, state: &Arc<AppState>, w: u32, h: u32) {
+    if !state.expanded.load(Ordering::Relaxed) {
+        return;
+    }
+    let Some(win) = app.get_webview_window("main") else { return };
+    let work = work_area_of(&win);
+    let size = clamp_panel_size((w, h), &work);
+    let pos = place_panel(&win, state, &work, size);
+    tracing::trace!(x = pos.0, y = pos.1, w = size.0, h = size.1, "拖拽预览");
+}
+
 /// 面板尺寸变化（拖拽把手落地 / 设置页滑块）后把窗口摆正。
 ///
 /// 与 [`on_bar_width_changed`] 分开，是因为两态的语义不同：
 /// 折叠条只动宽度、动完必须落库（宽度是锚点的一部分）；面板动宽高、而且**只影响展开态**——
 /// 收起态的窗口就是折叠条尺寸，用户此刻改面板尺寸不该让折叠条跳一下，等展开时自然用新值。
-///
-/// 落点用**锚点**而不是"当前窗口位置"：展开态的位置可能被上次的越界平移挪过，
-/// 拿它当基准会让面板越拖越往左上跑。
 pub fn on_panel_size_changed(app: &AppHandle, state: &Arc<AppState>) {
     if !state.expanded.load(Ordering::Relaxed) {
         tracing::debug!("收起态下面板尺寸变化不立刻生效，等展开时再用");
@@ -410,18 +491,11 @@ pub fn on_panel_size_changed(app: &AppHandle, state: &Arc<AppState>) {
     let Some(win) = app.get_webview_window("main") else { return };
     let work = work_area_of(&win);
     let size = size_on(state, true, &work);
-
-    let settings = state.settings_snapshot();
-    let origin = match (settings.window_x, settings.window_y) {
-        (Some(x), Some(y)) => (x, y),
-        _ => default_position(&work, state.size_for(false).0),
-    };
-    let pos = anchor(origin, size, &work);
-    apply_geometry(&win, pos, size);
+    place_panel(&win, state, &work, size);
 
     // 面板变大可能顶到屏幕边缘，形态要重新播一遍（前端与窗口几何对齐）
     broadcast_window_state(app, state);
-    tracing::debug!(w = size.0, h = size.1, "面板尺寸已套用");
+    tracing::info!(w = size.0, h = size.1, "面板尺寸已套用");
 }
 
 #[cfg(test)]

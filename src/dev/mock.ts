@@ -607,6 +607,36 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     case 'begin_drag':
       return undefined as T;
 
+    // 尺寸把手（优化 2）。浏览器预览里没有"原生窗口"可改 —— 面板就是视口，
+    // 改它的尺寸没有意义。这里只把上下限和最终尺寸记下来，让上层逻辑
+    // （滑块量程、落库、形态广播）在 mock 下也能完整跑通。
+    case 'begin_resize':
+      return {
+        w: settings.panel_w,
+        h: settings.panel_h,
+        min_w: 360,
+        min_h: 240,
+        max_w: 1200,
+        max_h: 1000,
+      } as T;
+
+    case 'preview_panel_size':
+      return undefined as T;
+
+    case 'end_resize': {
+      settings = {
+        ...settings,
+        panel_w: Number(a['w'] ?? settings.panel_w),
+        panel_h: Number(a['h'] ?? settings.panel_h),
+      } as SettingsDTO;
+      emit('window_state', {
+        expanded: windowExpanded,
+        width: 264,
+        height: windowExpanded ? 620 : 40,
+      });
+      return undefined as T;
+    }
+
     case 'window_state':
       return { expanded: windowExpanded, width: 264, height: windowExpanded ? 620 : 40 } as T;
 
