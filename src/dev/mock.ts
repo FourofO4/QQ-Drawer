@@ -277,6 +277,8 @@ let settings: SettingsDTO = {
   access_token: '',
   auto_reconnect: true,
   bar_width: 264,
+  panel_w: 584,
+  panel_h: 500,
   always_on_top: true,
   locked: false,
   snap_top: true,

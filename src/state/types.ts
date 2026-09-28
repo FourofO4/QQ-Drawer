@@ -161,6 +161,9 @@ export interface SettingsDTO {
   access_token: string;
   auto_reconnect: boolean;
   bar_width: number;
+  /** 展开面板尺寸（逻辑像素）。可用右下角把手拖拽，也可在设置页里精调。 */
+  panel_w: number;
+  panel_h: number;
   always_on_top: boolean;
   locked: boolean;
   snap_top: boolean;

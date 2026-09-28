@@ -46,9 +46,19 @@ pub mod events {
 
 /// 折叠条尺寸（§3.1）
 pub const BAR_H: u32 = 40;
-/// 展开面板尺寸（§3.1）
+/// 展开面板的**默认**尺寸（§3.1）。
+///
+/// 它只是出厂值：实际用的是 `Settings.panel_w` / `panel_h`（§3.1 原本写成常量，
+/// 但 FR-47 要求"尺寸落库"，两者矛盾，以 FR-47 为准）。用户拖拽把手或改设置页后，
+/// 库里就有了自己的值。
 pub const PANEL_W: u32 = 584;
 pub const PANEL_H: u32 = 500;
+/// 面板尺寸的合法下限（逻辑像素）。再小就装不下「标签栏 + 一行消息 + 输入区」。
+///
+/// 上限不存在这里 —— 它取决于当前显示器的工作区，只有 `window` 层知道，
+/// 所以真正的夹取统一走 [`crate::window::clamp_panel_size`]。
+pub const PANEL_MIN_W: u32 = 360;
+pub const PANEL_MIN_H: u32 = 240;
 /// 越界判定的安全边距
 pub const MARGIN: i32 = 16;
 
@@ -126,10 +136,18 @@ impl AppState {
         *self.conn.write() = info;
     }
 
-    /// 折叠条 / 面板尺寸：两态各自固定，切换时**一次到位**（§3.4 关键规则 3）
+    /// 折叠条 / 面板尺寸：两态各自固定，切换时**一次到位**（§3.4 关键规则 3）。
+    ///
+    /// 面板那一路读设置（FR-47）：用户拖过把手之后，库里存的才是准的。
+    /// 这里只兜**下限**，防住脏数据（`panel_w = 0` 会算出零面积窗口）；
+    /// 上限要看工作区，由 [`crate::window::clamp_panel_size`] 在套用前夹。
     pub fn size_for(&self, expanded: bool) -> (u32, u32) {
         if expanded {
-            (PANEL_W, PANEL_H)
+            let s = self.settings.read();
+            (
+                s.panel_w.max(PANEL_MIN_W as i32) as u32,
+                s.panel_h.max(PANEL_MIN_H as i32) as u32,
+            )
         } else {
             let w = self.settings.read().bar_width.clamp(180, 420) as u32;
             (w, BAR_H)
@@ -185,6 +203,31 @@ mod tests {
         let s = Settings { bar_width: 10_000, ..Settings::default() };
         let st = AppState::new(db, s, PathBuf::from("."));
         assert_eq!(st.size_for(false).0, 420);
+    }
+
+    #[test]
+    fn 出厂面板尺寸与常量一致() {
+        // §3.1 的尺寸表、`Settings::default()`、这里的常量三者必须是同一个数
+        let d = Settings::default();
+        assert_eq!((d.panel_w, d.panel_h), (PANEL_W as i32, PANEL_H as i32));
+    }
+
+    #[test]
+    fn 面板尺寸跟着设置走() {
+        let db = Db::open_memory().unwrap();
+        let s = Settings { panel_w: 720, panel_h: 640, ..Settings::default() };
+        let st = AppState::new(db, s, PathBuf::from("."));
+        assert_eq!(st.size_for(true), (720, 640), "拖过把手之后该用库里的值");
+        assert_eq!(st.size_for(false), (264, 40), "面板尺寸不该传染给折叠条");
+    }
+
+    #[test]
+    fn 面板尺寸的脏数据被抬到下限() {
+        let db = Db::open_memory().unwrap();
+        // 手改过 DB、或将来某条写入路径漏了夹取时，不能算出零面积窗口
+        let s = Settings { panel_w: 0, panel_h: -50, ..Settings::default() };
+        let st = AppState::new(db, s, PathBuf::from("."));
+        assert_eq!(st.size_for(true), (PANEL_MIN_W, PANEL_MIN_H));
     }
 
     #[test]

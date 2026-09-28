@@ -14,7 +14,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
 
-use crate::appstate::{AppState, MARGIN};
+use crate::appstate::{AppState, MARGIN, PANEL_MIN_H, PANEL_MIN_W};
 
 /// 吸附上边缘的触发距离（逻辑像素）。拖到这个距离以内就贴上去。
 pub const SNAP_THRESHOLD: i32 = 24;
@@ -109,6 +109,31 @@ pub fn clamp_to_work(p: (i32, i32), size: (u32, u32), work: &WorkArea) -> (i32, 
     (p.0.clamp(work.x + MARGIN, max_x), p.1.clamp(work.y + MARGIN, max_y))
 }
 
+/// 面板尺寸的夹取：**所有要用到面板尺寸的地方都必须过这里**。
+///
+/// 为什么需要它：面板尺寸是用户可拖的（`Settings.panel_w` / `panel_h`），而"多大算合适"
+/// 取决于当前显示器 —— 在一台 3840 宽的屏幕上拖到 1600，换回笔记本的 1366 屏就撑出去了。
+/// `clamp_to_work` 只能保住**位置**（把窗口挪回界内），保不住**尺寸**，两件事要分开做。
+///
+/// 工作区比下限还小时（极端小屏）允许下限 —— 宁可窗口比屏幕大，也不给出一个装不下的面板。
+pub fn clamp_panel_size(size: (u32, u32), work: &WorkArea) -> (u32, u32) {
+    let max_w = (work.w - 2 * MARGIN).max(PANEL_MIN_W as i32) as u32;
+    let max_h = (work.h - 2 * MARGIN).max(PANEL_MIN_H as i32) as u32;
+    (size.0.clamp(PANEL_MIN_W, max_w), size.1.clamp(PANEL_MIN_H, max_h))
+}
+
+/// 当前形态在这块工作区上**实际生效**的尺寸。
+///
+/// 折叠条没有可调上限（它只有宽度，且已经夹在 180–420），所以只有展开态需要夹。
+fn size_on(state: &Arc<AppState>, expanded: bool, work: &WorkArea) -> (u32, u32) {
+    let size = state.size_for(expanded);
+    if expanded {
+        clamp_panel_size(size, work)
+    } else {
+        size
+    }
+}
+
 /* ------------------------------ 副作用 ------------------------------ */
 
 /// 当前显示器的工作区。拿不到就退回主显示器，再拿不到就给一个保守值。
@@ -147,8 +172,8 @@ pub fn init(app: &AppHandle, state: &Arc<AppState>) {
     };
 
     let settings = state.settings_snapshot();
-    let (bw, bh) = state.size_for(false);
     let work = work_area_of(&win);
+    let (bw, bh) = size_on(state, false, &work);
 
     let origin = match (settings.window_x, settings.window_y) {
         (Some(x), Some(y)) => (x, y),
@@ -211,7 +236,7 @@ pub fn set_expanded(app: &AppHandle, state: &Arc<AppState>, expanded: bool) -> a
 
     let settings = state.settings_snapshot();
     let work = work_area_of(&win);
-    let size = state.size_for(expanded);
+    let size = size_on(state, expanded, &work);
 
     // 先算出落点，再动窗口。展开时 `origin` 就是锚点（折叠条的左上角）。
     let current = win
@@ -268,7 +293,12 @@ pub fn set_expanded(app: &AppHandle, state: &Arc<AppState>, expanded: bool) -> a
 /// 把当前形态播给前端。**幂等**，可以在任何觉得"状态可能漂了"的地方调用。
 pub fn broadcast_window_state(app: &AppHandle, state: &Arc<AppState>) {
     let expanded = state.expanded.load(Ordering::Relaxed);
-    let (width, height) = state.size_for(expanded);
+    // 广播的必须是**生效**尺寸（夹过工作区的），不是库里那个原始值 ——
+    // 前端与集成测试都拿它当"窗口现在多大"的事实，掺进越界的配置值就是埋雷。
+    let (width, height) = match app.get_webview_window("main") {
+        Some(win) => size_on(state, expanded, &work_area_of(&win)),
+        None => state.size_for(expanded),
+    };
     crate::appstate::emit(
         app,
         crate::appstate::events::WINDOW_STATE,
@@ -362,6 +392,36 @@ pub fn on_bar_width_changed(app: &AppHandle, state: &Arc<AppState>) {
     let origin = clamp_to_work(origin, (bw, bh), &work);
     apply_geometry(&win, origin, (bw, bh));
     persist_anchor(state, origin.0, origin.1);
+}
+
+/// 面板尺寸变化（拖拽把手落地 / 设置页滑块）后把窗口摆正。
+///
+/// 与 [`on_bar_width_changed`] 分开，是因为两态的语义不同：
+/// 折叠条只动宽度、动完必须落库（宽度是锚点的一部分）；面板动宽高、而且**只影响展开态**——
+/// 收起态的窗口就是折叠条尺寸，用户此刻改面板尺寸不该让折叠条跳一下，等展开时自然用新值。
+///
+/// 落点用**锚点**而不是"当前窗口位置"：展开态的位置可能被上次的越界平移挪过，
+/// 拿它当基准会让面板越拖越往左上跑。
+pub fn on_panel_size_changed(app: &AppHandle, state: &Arc<AppState>) {
+    if !state.expanded.load(Ordering::Relaxed) {
+        tracing::debug!("收起态下面板尺寸变化不立刻生效，等展开时再用");
+        return;
+    }
+    let Some(win) = app.get_webview_window("main") else { return };
+    let work = work_area_of(&win);
+    let size = size_on(state, true, &work);
+
+    let settings = state.settings_snapshot();
+    let origin = match (settings.window_x, settings.window_y) {
+        (Some(x), Some(y)) => (x, y),
+        _ => default_position(&work, state.size_for(false).0),
+    };
+    let pos = anchor(origin, size, &work);
+    apply_geometry(&win, pos, size);
+
+    // 面板变大可能顶到屏幕边缘，形态要重新播一遍（前端与窗口几何对齐）
+    broadcast_window_state(app, state);
+    tracing::debug!(w = size.0, h = size.1, "面板尺寸已套用");
 }
 
 #[cfg(test)]
@@ -461,6 +521,66 @@ mod tests {
         // 收起时用锚点（而不是展开后的位置）→ 回到原点
         let back = clamp_to_work(origin, (264, 40), &w);
         assert_eq!(back, origin);
+    }
+
+    /* ---------- 面板尺寸可配置（拖拽把手 / 设置页） ---------- */
+
+    #[test]
+    fn 面板尺寸_界内不动() {
+        assert_eq!(clamp_panel_size((700, 600), &work()), (700, 600));
+    }
+
+    #[test]
+    fn 面板尺寸_低于下限时抬到下限() {
+        assert_eq!(
+            clamp_panel_size((10, 10), &work()),
+            (crate::appstate::PANEL_MIN_W, crate::appstate::PANEL_MIN_H)
+        );
+    }
+
+    #[test]
+    fn 面板尺寸_超出工作区时压到工作区减两侧边距() {
+        // 1920 - 2*16 = 1888；1080 - 2*16 = 1048
+        assert_eq!(clamp_panel_size((5000, 5000), &work()), (1888, 1048));
+    }
+
+    #[test]
+    fn 面板尺寸_工作区比下限还小时允许下限() {
+        // 极端小屏：宁可窗口比屏幕大，也不给一个装不下面板的结果
+        let tiny = WorkArea::new(0, 0, 200, 150);
+        assert_eq!(
+            clamp_panel_size((500, 500), &tiny),
+            (crate::appstate::PANEL_MIN_W, crate::appstate::PANEL_MIN_H)
+        );
+    }
+
+    #[test]
+    fn 面板尺寸_夹取之后无论锚点在哪都留在工作区内() {
+        // 这正是上限取 `work.w - 2*MARGIN` 而不是 `work.w` 的理由：
+        // anchor() 会在「锚点 + 面板」越界时平移，两侧各留一个 MARGIN，
+        // 夹取后的尺寸才不会被锚点的位置顶出屏幕。
+        let w = work();
+        let size = clamp_panel_size((5000, 5000), &w);
+        // 把锚点摆到工作区最右端（能摆放的极限）
+        let origin = (w.right() - MARGIN - 264, w.y + MARGIN);
+        let (x, y) = anchor(origin, size, &w);
+        assert!(x >= w.x + MARGIN);
+        assert!(y >= w.y + MARGIN);
+        assert!(x + size.0 as i32 <= w.right() - MARGIN);
+        assert!(y + size.1 as i32 <= w.bottom() - MARGIN);
+    }
+
+    #[test]
+    fn 生效尺寸_展开态按工作区夹_收起态不夹() {
+        use crate::model::Settings;
+        let db = crate::store::Db::open_memory().unwrap();
+        let big = Settings { panel_w: 5000, panel_h: 5000, ..Settings::default() };
+        let st = crate::appstate::AppState::new(db, big, std::path::PathBuf::from("."));
+        assert_eq!(size_on(&st, true, &work()), (1888, 1048), "超大面板要压回工作区");
+
+        // 折叠条宽度本来就夹在 180–420，不该被小屏再压一次
+        let tiny = WorkArea::new(0, 0, 300, 200);
+        assert_eq!(size_on(&st, false, &tiny), (264, 40));
     }
 
     /* ---------- 拖动期间抑制自动收起（bug：拖动后窗口形体错乱） ---------- */

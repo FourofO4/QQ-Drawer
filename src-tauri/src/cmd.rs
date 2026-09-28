@@ -835,6 +835,8 @@ fn apply_setting_side_effects(app: &AppHandle, state: &Arc<AppState>, key: &str,
                 window::on_bar_width_changed(app, state);
             }
         }
+        // 面板尺寸（拖拽把手落地的也是这两个键，所以两条路共用同一段副作用）
+        "panel_w" | "panel_h" => window::on_panel_size_changed(app, state),
         "locked" => {
             tray::sync_lock_check(app, s.locked);
             if s.locked {

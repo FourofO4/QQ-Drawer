@@ -63,6 +63,8 @@ mod tests {
         let s = db.with(get_all).unwrap();
         assert_eq!(s.ws_url, "ws://127.0.0.1:3001");
         assert_eq!(s.bar_width, 264);
+        assert_eq!(s.panel_w, 584, "面板尺寸也是可配置项（FR-47：尺寸要落库）");
+        assert_eq!(s.panel_h, 500);
         assert_eq!(s.panel_alpha, 0.72);
         assert_eq!(s.tab_limit, 5);
         assert!(s.always_on_top);
@@ -95,6 +97,20 @@ mod tests {
             .with(|c| Ok(c.query_row("SELECT COUNT(*) FROM settings", [], |r| r.get(0))?))
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn 面板尺寸可以落库并在下次读回() {
+        let db = Db::open_memory().unwrap();
+        db.tx(|c| {
+            set(c, "panel_w", &json!(760))?;
+            set(c, "panel_h", &json!(680))?;
+            Ok(())
+        })
+        .unwrap();
+        let s = db.with(get_all).unwrap();
+        assert_eq!((s.panel_w, s.panel_h), (760, 680), "拖过的尺寸重启后要还在");
+        assert_eq!(s.bar_width, 264, "改面板不该牵动折叠条");
     }
 
     #[test]

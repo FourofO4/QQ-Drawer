@@ -302,6 +302,13 @@ pub struct Settings {
     pub auto_reconnect: bool,
 
     pub bar_width: i32,
+    /// 展开面板的尺寸（逻辑像素）。可用右下角把手拖拽，也可在设置页里精调。
+    ///
+    /// 这里存的只是**用户想要的**尺寸；真正套用前必须过 [`crate::window::clamp_panel_size`]
+    /// 按当前工作区夹一次 —— 换了小显示器之后，旧的大尺寸会撑出屏幕。
+    /// §3.1 原本把 584×500 写死成常量，FR-47 要求"尺寸落库"，两者本来就是矛盾的。
+    pub panel_w: i32,
+    pub panel_h: i32,
     pub always_on_top: bool,
     pub locked: bool,
     pub snap_top: bool,
@@ -338,6 +345,9 @@ impl Default for Settings {
             auto_reconnect: true,
 
             bar_width: 264,
+            // 出厂面板尺寸取 appstate 里的常量，避免"§3.1 表格 / 常量 / 默认值"三处对不上
+            panel_w: crate::appstate::PANEL_W as i32,
+            panel_h: crate::appstate::PANEL_H as i32,
             always_on_top: true,
             locked: false,
             snap_top: true,
