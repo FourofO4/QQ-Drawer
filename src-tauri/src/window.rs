@@ -250,8 +250,10 @@ pub fn set_expanded(app: &AppHandle, state: &Arc<AppState>, expanded: bool) -> a
         });
 
     let (pos, anchor) = if expanded {
-        // 锚点 = 折叠条左上角，面板向右下增长（§3.4 关键规则 1）
-        (anchor(current, size, &work), current)
+        // 锚点 = 折叠条左上角，面板向右下增长（§3.4 关键规则 1）。
+        // 拖过左 / 上边缘时面板相对锚点有一个偏移（panel_dx / panel_dy），要一并带上。
+        let base = (current.0 + settings.panel_dx, current.1 + settings.panel_dy);
+        (anchor(base, size, &work), current)
     } else {
         // 收起：**回到锚点，而不是"当前位置"**——展开时可能因为越界平移过，
         // 用当前位置会让折叠条越走越偏。
@@ -394,16 +396,30 @@ pub fn on_bar_width_changed(app: &AppHandle, state: &Arc<AppState>) {
     persist_anchor(state, origin.0, origin.1);
 }
 
-/// 面板的落点基准：**锚点**（折叠条左上角），不是当前窗口位置。
+/// 面板的落点基准：**锚点**（折叠条左上角）+ `panel_dx / panel_dy` 偏移。
 ///
 /// 展开态的位置可能被上次的越界平移挪过，拿"当前位置"当基准会让面板越拖越往左上爬。
 /// 拖拽过程中我们从不落库锚点，所以 `settings.window_x/y` 在这里恒等于真正的折叠条位置。
-fn panel_origin(state: &Arc<AppState>, work: &WorkArea) -> (i32, i32) {
+///
+/// 偏移只有拖**左 / 上**边缘时才会非零（那两条边必须让窗口原点跟着走，
+/// 否则用户拖上边界却看到下边界在动）。记成"相对锚点的偏移"而不是绝对坐标，
+/// 是为了让面板继续跟着折叠条走 —— 用户把折叠条拖到别处，面板跟着过去。
+pub fn panel_origin(state: &Arc<AppState>, work: &WorkArea) -> (i32, i32) {
     let settings = state.settings_snapshot();
-    match (settings.window_x, settings.window_y) {
+    let base = match (settings.window_x, settings.window_y) {
         (Some(x), Some(y)) => (x, y),
         _ => default_position(work, state.size_for(false).0),
-    }
+    };
+    (base.0 + settings.panel_dx, base.1 + settings.panel_dy)
+}
+
+/// 把一个面板矩形收进工作区：先夹尺寸，再夹位置。拖拽逐帧与落地共用。
+///
+/// 顺序不能反：位置的合法区间本身依赖尺寸，先定尺寸才能算出位置的上限。
+pub fn clamp_rect(rect: (i32, i32, u32, u32), work: &WorkArea) -> ((i32, i32), (u32, u32)) {
+    let size = clamp_panel_size((rect.2, rect.3), work);
+    let pos = clamp_to_work((rect.0, rect.1), size, work);
+    (pos, size)
 }
 
 /// 按锚点摆好面板。返回实际落点。
@@ -443,19 +459,75 @@ pub fn panel_size_limits(app: &AppHandle) -> ((u32, u32), (u32, u32)) {
     (min, max)
 }
 
-/// 落库前按当前显示器夹一次面板尺寸。
+/// 当前面板矩形 + 可拖范围，交给前端当拖拽起点。
 ///
-/// 为什么要在**写库前**夹：库里存的是"用户想要的尺寸"，跨显示器复用。若把 3840 屏上拖出来的
-/// 1600 原样写进去，换到 1366 的笔记本上读出来就是越界值 —— 用的时候虽然还会夹回来，
-/// 但设置页会显示一个假数值，用户看着莫名其妙。
-pub fn clamp_panel_size_on_main(app: &AppHandle, size: (u32, u32)) -> (u32, u32) {
-    match app.get_webview_window("main") {
-        Some(win) => clamp_panel_size(size, &work_area_of(&win)),
-        None => size,
+/// 位置用 `anchor(锚点 + 偏移)` 现算，而不是读窗口当前位置：拖动是"以按下那一刻为准"的
+/// 相对位移，起点必须和"再展开一次会得到的那个位置"完全一致，否则松手就会跳一下。
+pub fn panel_rect_now(app: &AppHandle, state: &Arc<AppState>) -> crate::model::ResizeBoundsDto {
+    let (min, max) = panel_size_limits(app);
+    let work = match app.get_webview_window("main") {
+        Some(win) => work_area_of(&win),
+        None => WorkArea::new(0, 0, 1920, 1080),
+    };
+    let size = match app.get_webview_window("main") {
+        Some(win) => size_on(state, true, &work_area_of(&win)),
+        None => state.size_for(true),
+    };
+    let pos = anchor(panel_origin(state, &work), size, &work);
+    crate::model::ResizeBoundsDto {
+        x: pos.0,
+        y: pos.1,
+        w: size.0,
+        h: size.1,
+        min_w: min.0,
+        min_h: min.1,
+        max_w: max.0,
+        max_h: max.1,
+        work_x: work.x,
+        work_y: work.y,
+        work_w: work.w.max(0) as u32,
+        work_h: work.h.max(0) as u32,
+        margin: MARGIN,
     }
 }
 
-/// 拖拽把手过程中的逐帧尺寸：**只动窗口，不落库、不广播**。
+/// 绝对矩形 → 落库用的 `(尺寸, 相对锚点的偏移)`。
+///
+/// `origin` 传的是 `panel_origin` 的结果，**它本身含旧偏移**；`old` 是那次读取到的旧偏移。
+/// 减掉它才是相对真正锚点的偏移 —— 忘掉这一步，面板每拖一次就往右下漂一个偏移量，
+/// 而"漂移量正好等于上次的偏移"这种 bug 在单次拖拽里完全看不出来。
+pub fn rect_to_setting(
+    rect: (i32, i32, u32, u32),
+    work: &WorkArea,
+    origin: (i32, i32),
+    old: (i32, i32),
+) -> ((u32, u32), (i32, i32)) {
+    let (pos, size) = clamp_rect(rect, work);
+    let base = (origin.0 - old.0, origin.1 - old.1);
+    (size, (pos.0 - base.0, pos.1 - base.1))
+}
+
+/// 拖拽落地时该写进库的一组值：`(panel_w, panel_h, panel_dx, panel_dy)`。
+///
+/// 前端送来的是**绝对矩形**，而面板位置是"锚点 + 偏移"派生出来的，这里换算一次。
+pub fn resolve_panel_rect(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+    rect: (i32, i32, u32, u32),
+) -> ((u32, u32), (i32, i32)) {
+    let Some(win) = app.get_webview_window("main") else {
+        return ((rect.2, rect.3), (0, 0));
+    };
+    let work = work_area_of(&win);
+    let origin = panel_origin(state, &work);
+    let s = state.settings_snapshot();
+    rect_to_setting(rect, &work, origin, (s.panel_dx, s.panel_dy))
+}
+
+/// 拖拽把手过程中的逐帧矩形：**只动窗口，不落库、不广播**。
+///
+/// 收的是**绝对矩形**（含位置）而不是只有尺寸：拖左 / 上边缘时窗口原点要跟着走，
+/// 只给尺寸就只能"改大小、原点不动"，表现为拖上边界、下边界在动。
 ///
 /// ⚠️ 这里有意识地对 §3.4 关键规则 3（"绝不逐帧改窗口尺寸"）开了例外，理由是那条规则的
 /// 适用对象不同：它针对的是**动画**——应用自己按时间轴改尺寸，180ms 十来帧，而且同时在动
@@ -467,14 +539,14 @@ pub fn clamp_panel_size_on_main(app: &AppHandle, size: (u32, u32)) -> (u32, u32)
 /// 改动只在 `ui/ResizeGrip.tsx` 里 —— **别在这里加节流**，节流已经在 rAF 那层做过一次了。
 ///
 /// **不落库是硬要求**：拖一次是 60 次/秒的写盘。
-pub fn preview_panel_size(app: &AppHandle, state: &Arc<AppState>, w: u32, h: u32) {
+pub fn preview_panel_rect(app: &AppHandle, state: &Arc<AppState>, rect: (i32, i32, u32, u32)) {
     if !state.expanded.load(Ordering::Relaxed) {
         return;
     }
     let Some(win) = app.get_webview_window("main") else { return };
     let work = work_area_of(&win);
-    let size = clamp_panel_size((w, h), &work);
-    let pos = place_panel(&win, state, &work, size);
+    let (pos, size) = clamp_rect(rect, &work);
+    apply_geometry(&win, pos, size);
     tracing::trace!(x = pos.0, y = pos.1, w = size.0, h = size.1, "拖拽预览");
 }
 
@@ -655,6 +727,70 @@ mod tests {
         // 折叠条宽度本来就夹在 180–420，不该被小屏再压一次
         let tiny = WorkArea::new(0, 0, 300, 200);
         assert_eq!(size_on(&st, false, &tiny), (264, 40));
+    }
+
+    /* ---------- 面板拖拽用的矩形换算 ---------- */
+
+    #[test]
+    fn 矩形_界内原样通过() {
+        assert_eq!(clamp_rect((300, 200, 584, 500), &work()), ((300, 200), (584, 500)));
+    }
+
+    #[test]
+    fn 矩形_越界只挪位置不缩尺寸() {
+        // 整块矩形拖到屏幕外：位置被收回来，尺寸一个像素都不动。
+        // 尺寸与位置分开夹是刻意的 —— 混在一起的话，用户把面板推到屏幕边上时
+        // 会看到面板莫名变小（"我只是挪一下，怎么缩了"）。
+        let (pos, size) = clamp_rect((-500, -500, 584, 500), &work());
+        assert_eq!(pos, (MARGIN, MARGIN));
+        assert_eq!(size, (584, 500));
+    }
+
+    #[test]
+    fn 矩形_尺寸超界时按工作区夹且不牵连位置() {
+        let (pos, size) = clamp_rect((200, 100, 5000, 5000), &work());
+        assert_eq!(size, ((1920 - 2 * MARGIN) as u32, (1080 - 2 * MARGIN) as u32));
+        // 尺寸一旦撑满工作区，位置就没有余量了，必然被收到左上角 —— 这不是 bug，
+        // 而是"面板比工作区大"时唯一自洽的结果。
+        assert_eq!(pos, (MARGIN, MARGIN));
+    }
+
+    #[test]
+    fn 偏移换算_必须减掉旧偏移否则每拖一次漂一次() {
+        // 锚点 (100, 50) + 旧偏移 (40, 20) → panel_origin 给出的就是 (140, 70)
+        let origin = (140, 70);
+        let (_, ok) = rect_to_setting((500, 300, 584, 500), &work(), origin, (40, 20));
+        assert_eq!(ok, (400, 250), "相对锚点 (100, 50) 的偏移");
+
+        // 反例：把含旧偏移的 origin 直接当锚点 —— 算出来的偏移小了整整一个旧偏移，
+        // 于是下次展开时面板往左上跳 (40, 20)，而且每拖一次累积一次。
+        let (_, bad) = rect_to_setting((500, 300, 584, 500), &work(), origin, (0, 0));
+        assert_eq!(ok.0 - bad.0, 40);
+        assert_eq!(ok.1 - bad.1, 20);
+    }
+
+    #[test]
+    fn 面板原点_无偏移时就是锚点本身() {
+        use crate::model::Settings;
+        let db = crate::store::Db::open_memory().unwrap();
+        let s = Settings { window_x: Some(1640), window_y: Some(16), ..Settings::default() };
+        let st = crate::appstate::AppState::new(db, s, std::path::PathBuf::from("."));
+        assert_eq!(panel_origin(&st, &work()), (1640, 16), "默认 0 偏移 = 改动前的行为");
+    }
+
+    #[test]
+    fn 面板原点_偏移叠在锚点上_折叠条一动面板跟着走() {
+        use crate::model::Settings;
+        let db = crate::store::Db::open_memory().unwrap();
+        let s = Settings {
+            window_x: Some(100),
+            window_y: Some(50),
+            panel_dx: 40,
+            panel_dy: 20,
+            ..Settings::default()
+        };
+        let st = crate::appstate::AppState::new(db, s, std::path::PathBuf::from("."));
+        assert_eq!(panel_origin(&st, &work()), (140, 70));
     }
 
     /* ---------- 拖动期间抑制自动收起（bug：拖动后窗口形体错乱） ---------- */

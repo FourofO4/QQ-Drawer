@@ -279,6 +279,8 @@ let settings: SettingsDTO = {
   bar_width: 264,
   panel_w: 584,
   panel_h: 500,
+  panel_dx: 0,
+  panel_dy: 0,
   always_on_top: true,
   locked: false,
   snap_top: true,
@@ -608,19 +610,26 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return undefined as T;
 
     // 尺寸把手（优化 2）。浏览器预览里没有"原生窗口"可改 —— 面板就是视口，
-    // 改它的尺寸没有意义。这里只把上下限和最终尺寸记下来，让上层逻辑
+    // 改它的尺寸没有意义。这里只把范围与最终结果记下来，让上层逻辑
     // （滑块量程、落库、形态广播）在 mock 下也能完整跑通。
     case 'begin_resize':
       return {
+        x: 0,
+        y: 0,
         w: settings.panel_w,
         h: settings.panel_h,
         min_w: 360,
         min_h: 240,
         max_w: 1200,
         max_h: 1000,
+        work_x: 0,
+        work_y: 0,
+        work_w: 1920,
+        work_h: 1080,
+        margin: 16,
       } as T;
 
-    case 'preview_panel_size':
+    case 'preview_panel_rect':
       return undefined as T;
 
     case 'end_resize': {
@@ -628,6 +637,8 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         ...settings,
         panel_w: Number(a['w'] ?? settings.panel_w),
         panel_h: Number(a['h'] ?? settings.panel_h),
+        panel_dx: Number(a['x'] ?? 0),
+        panel_dy: Number(a['y'] ?? 0),
       } as SettingsDTO;
       emit('window_state', {
         expanded: windowExpanded,

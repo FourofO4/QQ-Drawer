@@ -242,10 +242,14 @@ export function Settings() {
                   <input
                     type="number"
                     min="1"
-                    max="12"
+                    max="20"
                     value={s().tab_limit}
                     onChange={(e) => void save('tab_limit', Number(e.currentTarget.value))}
                   />
+                </div>
+                <div class="note">
+                  上限 20。标签装不下时会先压窄、再横向滚动（滚轮在标签栏上就是横滚），
+                  不会像以前那样被裁掉。
                 </div>
                 <div class="field">
                   <label>闪烁次数</label>

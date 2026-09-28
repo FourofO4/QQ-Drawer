@@ -289,16 +289,28 @@ pub struct WindowStateDto {
 /// 开始拖拽面板把手时，向 Rust 要的一组约束。
 ///
 /// 为什么不能在前端写死：上限取决于**当前显示器的工作区**，那是只有窗口层知道的事。
-/// 前端拿到之后只管按 delta 算尺寸并先夹一遍（为了手感连续），权威夹取仍在 Rust。
+/// 前端拿到之后只管按 delta 算矩形并先夹一遍（为了手感连续），权威夹取仍在 Rust。
+///
+/// 为什么给的是**矩形**而不只是尺寸：拖左 / 上边缘时窗口原点要跟着走，
+/// 只给尺寸的话前端算不出"另一条边钉在哪"，只能退化成"改尺寸、原点不动"——
+/// 表现为拖上边界、下边界在动。全部字段单位是**物理像素**。
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct ResizeBoundsDto {
-    /// 当前生效的面板尺寸（拖拽起点）
+    /// 当前生效的面板矩形（拖拽起点）
+    pub x: i32,
+    pub y: i32,
     pub w: u32,
     pub h: u32,
     pub min_w: u32,
     pub min_h: u32,
     pub max_w: u32,
     pub max_h: u32,
+    /// 当前显示器工作区与安全边距 —— 前端拿它把拖动结果先夹在屏幕内
+    pub work_x: i32,
+    pub work_y: i32,
+    pub work_w: u32,
+    pub work_h: u32,
+    pub margin: i32,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -324,6 +336,13 @@ pub struct Settings {
     /// §3.1 原本把 584×500 写死成常量，FR-47 要求"尺寸落库"，两者本来就是矛盾的。
     pub panel_w: i32,
     pub panel_h: i32,
+    /// 面板左上角相对**锚点**（折叠条左上角）的偏移，物理像素。默认 0 —— 面板从锚点向右下长。
+    ///
+    /// 只有拖**左 / 上**边缘时才会是非零：那两个方向必须让窗口原点跟着走，
+    /// 否则用户拖上边界却看到下边界在动。偏移记在锚点上而不是"面板绝对坐标"，
+    /// 是为了让面板继续跟着折叠条走 —— 拖动折叠条换位置时，面板自动跟随。
+    pub panel_dx: i32,
+    pub panel_dy: i32,
     pub always_on_top: bool,
     pub locked: bool,
     pub snap_top: bool,
@@ -363,6 +382,8 @@ impl Default for Settings {
             // 出厂面板尺寸取 appstate 里的常量，避免"§3.1 表格 / 常量 / 默认值"三处对不上
             panel_w: crate::appstate::PANEL_W as i32,
             panel_h: crate::appstate::PANEL_H as i32,
+            panel_dx: 0,
+            panel_dy: 0,
             always_on_top: true,
             locked: false,
             snap_top: true,

@@ -7,7 +7,7 @@
  * 顺带承担顶栏空白区的拖动职责（面板顶部空白区可拖窗）。
  */
 
-import { For, Show, createSignal, createMemo } from 'solid-js';
+import { For, Show, createSignal, createMemo, createEffect } from 'solid-js';
 import * as S from '../state/store';
 import * as ipc from '../state/ipc';
 import { peerKey } from '../core/preview';
@@ -23,6 +23,31 @@ export function Tabs() {
 
   const list = S.tabs;
   const activeKey = () => S.state.current;
+
+  /**
+   * 标签栏横滚：把竖直滚轮映射成横向。
+   *
+   * 标签多到装不下时 `.tabs-drag` 是横滚的（见 global.css），而 40px 高的条里
+   * 放一条滚动条会把 26px 的标签挤变形，所以滚动条被隐藏了 —— 滚轮就是唯一的滚动入口，
+   * 没这一段的话，超出的标签只能靠触摸板横滑或键盘够到。
+   */
+  const onWheel = (e: WheelEvent & { currentTarget: HTMLElement }) => {
+    const el = e.currentTarget;
+    if (el.scrollWidth <= el.clientWidth) return;
+    // 触摸板的横向滑动给的是 deltaX，鼠标滚轮给的是 deltaY，谁大用谁
+    const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+    if (d === 0) return;
+    e.preventDefault();
+    el.scrollLeft += d;
+  };
+
+  /** 切到某个会话时把它滚进视野 —— 横滚之后别让用户找不到自己在哪个标签上 */
+  createEffect(() => {
+    const key = activeKey();
+    if (key === null) return;
+    const el = document.querySelector<HTMLElement>(`[data-tab-key="${CSS.escape(key)}"]`);
+    el?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  });
 
   /** `···` 整体留轻微痕迹：内部只要有未读就亮（FR-15，不做数字） */
   const moreUnread = createMemo(() =>
@@ -120,10 +145,12 @@ export function Tabs() {
   /** 顶栏空白区拖动窗口 */
   const dragWindow = (e: MouseEvent) => {
     if (e.button !== 0) return;
-    // 落在标签 / 按钮上的按下由它们自己（或各自的 onMouseDown）处理，
+    // 落在标签 / 按钮 / 尺寸把手上的按下由它们自己（或各自的 onMouseDown）处理，
     // 这里只接管真正的空白区。没有这道闸，拖标签会**同时**触发窗口拖动 ——
     // 两个 mousemove 处理器一起跑，标签拖到一半窗口整块跟着位移。
-    if ((e.target as HTMLElement | null)?.closest('.tab, button, .composer')) return;
+    // `.grip` 同理：顶边那条 5px 的尺寸把手就压在标签栏上，漏掉它的话
+    // 拖顶边会变成"改高度 + 挪窗口"两件事一起做。
+    if ((e.target as HTMLElement | null)?.closest('.tab, button, .composer, .grip')) return;
     const x0 = e.clientX;
     const y0 = e.clientY;
     const onMove = (ev: MouseEvent) => {
@@ -145,7 +172,7 @@ export function Tabs() {
 
   return (
     <div class="tabs" onMouseDown={dragWindow}>
-      <div class="tabs-drag">
+      <div class="tabs-drag" onWheel={onWheel}>
         <For each={list()}>
           {(conv, i) => (
             <div

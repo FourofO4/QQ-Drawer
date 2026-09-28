@@ -51,7 +51,7 @@ export const CMD = {
   collapse: 'collapse_window',
   beginDrag: 'begin_drag',
   beginResize: 'begin_resize',
-  previewPanelSize: 'preview_panel_size',
+  previewPanelRect: 'preview_panel_rect',
   endResize: 'end_resize',
   windowState: 'window_state',
   exit: 'exit_app',
@@ -270,28 +270,42 @@ export const setViewing = (peerType: PeerType | null, peerId: number | null) =>
  */
 export const beginDrag = () => call<void>(CMD.beginDrag);
 
-/** 面板尺寸的上下限，由 Rust 按当前显示器的工作区算出来（前端写死不了） */
+/**
+ * 面板拖拽的起点与可拖范围，由 Rust 按当前显示器的工作区算出来（前端写死不了）。
+ *
+ * 给的是**矩形**而不是只有尺寸：拖左 / 上边缘时窗口原点要跟着走，只给尺寸的话
+ * 前端算不出"对边钉在哪"，只能退化成"改尺寸、原点不动"—— 表现为拖上边界、下边界在动。
+ * 单位统一是**物理像素**。
+ */
 export interface ResizeBounds {
+  x: number;
+  y: number;
   w: number;
   h: number;
   min_w: number;
   min_h: number;
   max_w: number;
   max_h: number;
+  work_x: number;
+  work_y: number;
+  work_w: number;
+  work_h: number;
+  margin: number;
 }
 
-/** 开始拖拽面板把手：拿当前尺寸与上下限。**无副作用**。 */
+/** 开始拖拽面板把手：拿当前矩形与可拖范围。**无副作用**。 */
 export const beginResize = () => call<ResizeBounds>(CMD.beginResize);
 
 /**
- * 拖拽过程中的逐帧尺寸。只改窗口，不落库也不广播 ——
+ * 拖拽过程中的逐帧矩形。只改窗口，不落库也不广播 ——
  * 每帧写一次盘（每秒几十次）是不可接受的，落库统一放在 `endResize`。
  */
-export const previewPanelSize = (w: number, h: number) =>
-  call<void>(CMD.previewPanelSize, { w, h });
+export const previewPanelRect = (x: number, y: number, w: number, h: number) =>
+  call<void>(CMD.previewPanelRect, { x, y, w, h });
 
-/** 拖拽落地：Rust 会再夹一次、写库、套用，并把权威形态播回来。 */
-export const endResize = (w: number, h: number) => call<void>(CMD.endResize, { w, h });
+/** 拖拽落地：Rust 会再夹一次、把尺寸与偏移一次写库、套用，并把权威形态播回来。 */
+export const endResize = (x: number, y: number, w: number, h: number) =>
+  call<void>(CMD.endResize, { x, y, w, h });
 
 /** 问一次窗口形态的权威值（bootstrap 自检用） */
 export const windowState = () =>

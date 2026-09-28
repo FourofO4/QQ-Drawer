@@ -127,7 +127,7 @@ pub fn run() {
             cmd::collapse_window,
             cmd::begin_drag,
             cmd::begin_resize,
-            cmd::preview_panel_size,
+            cmd::preview_panel_rect,
             cmd::end_resize,
             cmd::window_state,
             cmd::set_viewing,

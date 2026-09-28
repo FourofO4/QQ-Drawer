@@ -859,8 +859,10 @@ fn apply_setting_side_effects(app: &AppHandle, state: &Arc<AppState>, key: &str,
                 window::on_bar_width_changed(app, state);
             }
         }
-        // 面板尺寸（拖拽把手落地的也是这两个键，所以两条路共用同一段副作用）
-        "panel_w" | "panel_h" => window::on_panel_size_changed(app, state),
+        // 面板尺寸 / 偏移（拖拽把手落地的也是这几个键，所以两条路共用同一段副作用）
+        "panel_w" | "panel_h" | "panel_dx" | "panel_dy" => {
+            window::on_panel_size_changed(app, state)
+        }
         "locked" => {
             tray::sync_lock_check(app, s.locked);
             if s.locked {
@@ -959,49 +961,59 @@ pub fn begin_drag(app: AppHandle, state: State<'_, Arc<AppState>>) -> CmdResult<
     window::begin_drag(&app, state.inner()).map_err(err)
 }
 
-/// 开始拖拽面板尺寸把手：把当前尺寸与上下限交给前端。
+/// 开始拖拽面板尺寸把手：把当前矩形与可拖范围交给前端。
 ///
-/// **没有副作用**。拖拽期间尺寸由 [`preview_panel_size`] 逐帧改，这里只负责回答
+/// **没有副作用**。拖拽期间矩形由 [`preview_panel_rect`] 逐帧改，这里只负责回答
 /// "从哪开始、最多到哪" —— 上限取决于当前显示器的工作区，只有窗口层知道，前端写死不了。
 #[tauri::command]
 pub fn begin_resize(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> CmdResult<crate::model::ResizeBoundsDto> {
-    let (w, h) = window::panel_size_now(&app, state.inner());
-    let ((min_w, min_h), (max_w, max_h)) = window::panel_size_limits(&app);
-    Ok(crate::model::ResizeBoundsDto { w, h, min_w, min_h, max_w, max_h })
+    Ok(window::panel_rect_now(&app, state.inner()))
 }
 
-/// 拖拽过程中的逐帧尺寸。只动窗口，**不落库、不广播**。
+/// 拖拽过程中的逐帧矩形。只动窗口，**不落库、不广播**。
 ///
 /// 不落库是硬要求：拖一次是每秒几十次的写盘。广播也没必要 —— 形态没变，只有尺寸在动，
 /// 前端本来就知道自己要多大。
 #[tauri::command]
-pub fn preview_panel_size(
+pub fn preview_panel_rect(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
+    x: i32,
+    y: i32,
     w: u32,
     h: u32,
 ) -> CmdResult<()> {
-    window::preview_panel_size(&app, state.inner(), w, h);
+    window::preview_panel_rect(&app, state.inner(), (x, y, w, h));
     Ok(())
 }
 
 /// 拖拽落地：夹一次 → 落库 → 套用。与设置页滑块走同一条落地路径
 /// （`apply_setting_side_effects` 的 `panel_w | panel_h` 分支）。
+///
+/// 位置与尺寸必须**一次写完**：拆成两次的话，中间那一帧窗口是"新位置 + 旧尺寸"，
+/// 拖左 / 上边缘时看得见一格抖动。
 #[tauri::command]
 pub fn end_resize(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
+    x: i32,
+    y: i32,
     w: u32,
     h: u32,
 ) -> CmdResult<()> {
-    let (w, h) = window::clamp_panel_size_on_main(&app, (w, h));
+    let ((w, h), (dx, dy)) = window::resolve_panel_rect(&app, state.inner(), (x, y, w, h));
     write_settings(
         &app,
         state.inner(),
-        &[("panel_w", Value::from(w)), ("panel_h", Value::from(h))],
+        &[
+            ("panel_w", Value::from(w)),
+            ("panel_h", Value::from(h)),
+            ("panel_dx", Value::from(dx)),
+            ("panel_dy", Value::from(dy)),
+        ],
     )
 }
 

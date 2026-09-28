@@ -64,11 +64,17 @@ export function Panel() {
         <CacheManager />
       </Show>
 
-      {/* 尺寸把手（优化 2）。只放右 / 下两侧：左、上的把手会移动窗口原点，
-          而"锚点 = 折叠条左上角、面板向右下增长"是 §3.4 关键规则 1。 */}
-      <ResizeGrip axis="w" class="grip-r" />
-      <ResizeGrip axis="h" class="grip-b" />
-      <ResizeGrip axis="both" class="grip-br" />
+      {/* 尺寸把手（优化 2）：四条边 + 四个角。抓哪条边就动哪条边、对边钉住。
+          左 / 上的把手会让窗口原点跟着走 —— Rust 侧落库的是"面板相对锚点的偏移"，
+          所以面板仍然跟着折叠条走（拖折叠条换位置时面板自动跟随）。 */}
+      <ResizeGrip edge="n" class="grip-n" />
+      <ResizeGrip edge="s" class="grip-s" />
+      <ResizeGrip edge="w" class="grip-w" />
+      <ResizeGrip edge="e" class="grip-e" />
+      <ResizeGrip edge="nw" class="grip-nw" />
+      <ResizeGrip edge="ne" class="grip-ne" />
+      <ResizeGrip edge="sw" class="grip-sw" />
+      <ResizeGrip edge="se" class="grip-se" />
     </div>
   );
 }
